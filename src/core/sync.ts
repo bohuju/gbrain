@@ -11,6 +11,8 @@
  *   pathToSlug()  →  convert file paths to page slugs
  */
 
+import { isCodePath } from './code/languages.ts';
+
 export type SyncableKind = 'markdown' | 'code';
 
 export interface SyncManifest {
@@ -30,12 +32,6 @@ export interface SyncManifestEntry {
   path: string;
   kind: SyncableKind;
 }
-
-export const CODE_EXTENSIONS = new Set([
-  '.ts', '.tsx', '.js', '.jsx', '.mjs',
-  '.py', '.go', '.rs', '.java', '.c', '.cpp', '.h',
-  '.rb', '.swift', '.kt', '.sh', '.sql',
-]);
 
 /**
  * Parse the output of `git diff --name-status -M LAST..HEAD` into structured entries.
@@ -106,9 +102,7 @@ export function isSyncable(path: string, opts: { includeCode?: boolean } = {}): 
   if (path.endsWith('.md') || path.endsWith('.mdx')) return 'markdown';
 
   if (opts.includeCode) {
-    const extIndex = path.lastIndexOf('.');
-    const ext = extIndex >= 0 ? path.slice(extIndex).toLowerCase() : '';
-    if (CODE_EXTENSIONS.has(ext)) return 'code';
+    if (isCodePath(path)) return 'code';
   }
 
   return false;

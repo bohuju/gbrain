@@ -4,10 +4,10 @@ import { join, relative } from 'path';
 import { cpus, totalmem, homedir } from 'os';
 import type { BrainEngine } from '../core/engine.ts';
 import { importCodeFile, importFile } from '../core/import-file.ts';
+import { isCodePath } from '../core/code/languages.ts';
 import { loadConfig } from '../core/config.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
-import { CODE_EXTENSIONS } from '../core/sync.ts';
 
 function defaultWorkers(): number {
   const cpuCount = cpus().length;
@@ -314,7 +314,5 @@ export function collectMarkdownFiles(dir: string): string[] {
 }
 
 function isCodeFile(path: string): boolean {
-  const extIndex = path.lastIndexOf('.');
-  const ext = extIndex >= 0 ? path.slice(extIndex).toLowerCase() : '';
-  return CODE_EXTENSIONS.has(ext);
+  return isCodePath(path);
 }

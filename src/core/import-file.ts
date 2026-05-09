@@ -4,6 +4,7 @@ import type { BrainEngine } from './engine.ts';
 import { parseMarkdown } from './markdown.ts';
 import { chunkText } from './chunkers/recursive.ts';
 import { chunkCode } from './chunkers/code.ts';
+import { detectCodeLanguage } from './code/languages.ts';
 import { extractSymbols } from './code/symbol-extractor.ts';
 import { extractReferences } from './code/reference-extractor.ts';
 import { embedBatch } from './embedding.ts';
@@ -48,34 +49,31 @@ export interface CodeImportResult {
 
 const MAX_FILE_SIZE = 5_000_000; // 5MB
 
-const LANGUAGE_BY_EXTENSION: Record<string, string> = {
-  '.ts': 'typescript',
-  '.tsx': 'typescript',
-  '.js': 'javascript',
-  '.jsx': 'javascript',
-  '.mjs': 'javascript',
-  '.py': 'python',
-  '.go': 'go',
-  '.rs': 'rust',
-  '.java': 'java',
-  '.c': 'c',
-  '.cpp': 'cpp',
-  '.h': 'c',
-  '.rb': 'ruby',
-  '.swift': 'swift',
-  '.kt': 'kotlin',
-  '.sh': 'shell',
-  '.sql': 'sql',
-};
-
-export function detectCodeLanguage(filePath: string): string {
-  const extIndex = filePath.lastIndexOf('.');
-  const ext = extIndex >= 0 ? filePath.slice(extIndex).toLowerCase() : '';
-  return LANGUAGE_BY_EXTENSION[ext] || 'code';
-}
-
 export function codePathToSlug(relativePath: string): string {
   return `code/${slugifyCodePath(relativePath)}`;
+}
+
+function pushCodeChunks(
+  chunks: ChunkInput[],
+  text: string,
+  opts: {
+    startLineOffset?: number;
+    symbolName?: string;
+    symbolKind?: string;
+  } = {},
+): void {
+  const startLineOffset = opts.startLineOffset ?? 0;
+  for (const chunk of chunkCode(text, { maxLines: 80, overlapLines: 5 })) {
+    chunks.push({
+      chunk_index: chunks.length,
+      chunk_text: chunk.text,
+      chunk_source: 'source_code',
+      start_line: startLineOffset + chunk.startLine,
+      end_line: startLineOffset + chunk.endLine,
+      symbol_name: opts.symbolName,
+      symbol_kind: opts.symbolKind,
+    });
+  }
 }
 
 /**
@@ -299,32 +297,35 @@ export async function importCodeFile(
   const lines = content.replace(/\r\n/g, '\n').split('\n');
   const chunks: ChunkInput[] = [];
   if (symbols.length > 0) {
+    const covered = new Array(lines.length).fill(false);
     for (const symbol of symbols) {
-      const symbolText = lines.slice(symbol.startLine - 1, symbol.endLine).join('\n');
-      const symbolChunks = chunkCode(symbolText, { maxLines: 80, overlapLines: 5 });
-      if (symbolChunks.length === 0) continue;
-      for (const chunk of symbolChunks) {
-        chunks.push({
-          chunk_index: chunks.length,
-          chunk_text: chunk.text,
-          chunk_source: 'source_code',
-          start_line: symbol.startLine + chunk.startLine - 1,
-          end_line: symbol.startLine + chunk.endLine - 1,
-          symbol_name: symbol.name,
-          symbol_kind: symbol.kind,
-        });
+      for (let line = symbol.startLine; line <= Math.min(symbol.endLine, lines.length); line++) {
+        covered[line - 1] = true;
       }
-    }
-  } else {
-    for (const chunk of chunkCode(content)) {
-      chunks.push({
-        chunk_index: chunks.length,
-        chunk_text: chunk.text,
-        chunk_source: 'source_code',
-        start_line: chunk.startLine,
-        end_line: chunk.endLine,
+      const symbolText = lines.slice(symbol.startLine - 1, symbol.endLine).join('\n');
+      pushCodeChunks(chunks, symbolText, {
+        startLineOffset: symbol.startLine - 1,
+        symbolName: symbol.name,
+        symbolKind: symbol.kind,
       });
     }
+
+    let runStart: number | null = null;
+    for (let i = 0; i <= lines.length; i++) {
+      const isCovered = i < lines.length ? covered[i] : true;
+      if (!isCovered) {
+        runStart ??= i;
+        continue;
+      }
+      if (runStart === null) continue;
+      const runText = lines.slice(runStart, i).join('\n');
+      if (runText.trim()) {
+        pushCodeChunks(chunks, runText, { startLineOffset: runStart });
+      }
+      runStart = null;
+    }
+  } else {
+    pushCodeChunks(chunks, content);
   }
 
   if (!opts.noEmbed && chunks.length > 0) {

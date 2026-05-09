@@ -69,6 +69,34 @@ describe('importCodeFile', () => {
     }
   });
 
+  test('keeps non-symbol top-level code searchable', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-code-coverage-'));
+    try {
+      const file = join(dir, 'importer.ts');
+      writeFileSync(file, [
+        "import { helper } from './helper';",
+        '',
+        'export function run() {',
+        '  return helper();',
+        '}',
+      ].join('\n'));
+
+      const engine = mockEngine();
+      await importCodeFile(engine, file, 'src/importer.ts', { noEmbed: true });
+
+      const calls = (engine as any)._calls;
+      const chunkCall = calls.find((c: any) => c.method === 'upsertChunks');
+      expect(chunkCall.args[1].some((chunk: any) =>
+        chunk.chunk_text.includes("import { helper } from './helper';")
+        && chunk.symbol_name == null)).toBe(true);
+      expect(chunkCall.args[1].some((chunk: any) =>
+        chunk.symbol_name === 'run'
+        && chunk.chunk_text.includes('return helper();'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('codePathToSlug strips code extensions', () => {
     expect(codePathToSlug('src/core/operations.ts')).toBe('code/src/core/operations');
     expect(codePathToSlug('scripts/load_data.py')).toBe('code/scripts/load_data');
@@ -94,6 +122,12 @@ describe('importCodeFile', () => {
         from_slug: 'code/src/importer',
         to_slug: 'code/src/helper',
         link_type: 'imports',
+        link_source: 'code_import',
+      }));
+      expect(links).toContainEqual(expect.objectContaining({
+        from_slug: 'code/src/importer',
+        to_slug: 'code/src/helper',
+        link_type: 'calls',
         link_source: 'code_import',
       }));
 

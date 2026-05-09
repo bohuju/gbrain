@@ -155,17 +155,15 @@ Cross-cutting rules in `skills/conventions/`:
 
 ## How It Works
 
-```
-Signal arrives (meeting, email, tweet, link)
-  -> Signal detector captures ideas + entities (parallel, never blocks)
-  -> Brain-ops: check the brain first (gbrain search, gbrain get)
-  -> Respond with full context
-  -> Write: update brain pages with new information + citations
-  -> Auto-link: typed relationships extracted on every write (zero LLM calls)
-  -> Sync: gbrain indexes changes for next query
+The operational loop is simple:
+
+```text
+signal in → brain lookup → response/workflow → write back → derived state refresh → better next turn
 ```
 
-Every cycle adds knowledge. The agent enriches a person page after a meeting. Next time that person comes up, the agent already has context. The difference compounds daily.
+The detailed mechanics now live in [End-to-End Pipelines](#end-to-end-pipelines). That section is the canonical walkthrough for write, code, sync, search, graph, files, jobs, and maintenance flows.
+
+What matters at the product level is the compounding loop: every meeting, page edit, sync, import, and cron run leaves the brain in a better state for the next turn. The agent enriches a person page after a meeting; next time that person appears, the context is already there.
 
 The system gets smarter on its own. Entity enrichment auto-escalates: a person mentioned once gets a stub page (Tier 3). After 3 mentions across different sources, they get web + social enrichment (Tier 2). After a meeting or 8+ mentions, full pipeline (Tier 1). The brain learns who matters without being told. Deterministic classifiers improve over time via a fail-improve loop that logs every LLM fallback and generates better regex patterns from the failures. `gbrain doctor` shows the trajectory: "intent classifier: 87% deterministic, up from 40% in week 1."
 
@@ -330,6 +328,213 @@ Run `gbrain integrations` to see status.
 
 The repo is the system of record. GBrain is the retrieval layer. The agent reads and writes through both. Human always wins... edit any markdown file and `gbrain sync` picks up the changes.
 
+## End-to-End Pipelines
+
+GBrain is not one pipeline. It is a set of deterministic pipelines that share the same core tables, engine interface, and skill layer:
+
+- `pages` is the canonical content layer for markdown pages and code files.
+- `content_chunks` is the retrieval layer for compiled truth, timeline, and source code chunks.
+- `links` is the graph layer for markdown references and code references.
+- `page_versions` is the history layer for edits and re-imports.
+- `sources`, `files`, `minion_jobs`, and config keys are the operational layer around the brain.
+
+Everything below reuses those same primitives.
+
+### 1. Entry points
+
+```
+Human / Agent / Cron / Webhook / MCP client
+  → CLI (`gbrain ...`) or MCP server (`gbrain serve`)
+  → operations.ts contract
+  → BrainEngine (`pglite` or `postgres`)
+  → shared tables + shared search/graph/chunk logic
+```
+
+- CLI callers are trusted local callers.
+- MCP callers are remote callers and go through the stricter trust boundary.
+- The same operation contract powers both surfaces, so behavior is shared instead of forked.
+
+### 2. Markdown write pipeline
+
+```
+put/import/sync of markdown
+  → parse frontmatter + body
+  → slug authority check (path-derived slug wins)
+  → split into compiled_truth + timeline
+  → chunk compiled_truth/timeline
+  → embed chunks (best-effort, before DB transaction)
+  → transaction:
+      createVersion (if existing)
+      putPage
+      reconcile tags
+      upsertChunks / deleteChunks
+  → auto-link post-hook
+  → search + graph immediately see the new state
+```
+
+Key properties:
+
+- Idempotent by content hash.
+- Empty content removes stale chunks.
+- Embedding failure does not block page persistence.
+- Page text remains the source of truth; derived graph/search state is rebuildable.
+
+### 3. Code import pipeline
+
+```
+sync/import with --include-code
+  → detectCodeLanguage
+  → codePathToSlug
+  → extractSymbols
+  → extractReferences
+  → chunk symbol bodies + uncovered top-level code
+  → embed chunks (best-effort)
+  → transaction:
+      createVersion (if existing)
+      putPage(type=code_file, compiled_truth=raw source)
+      reconcile language tag
+      upsertChunks(source_code)
+      delete stale code_import links
+      addLinksBatch(imports/calls/extends/implements/tests)
+```
+
+Key properties:
+
+- Code is layered onto the existing page/chunk/link model, not a parallel subsystem.
+- `code_search_vector` uses `simple` tsvector config to preserve identifiers.
+- Code files can be listed, searched, versioned, graphed, orphan-checked, and exported through the same core machinery.
+
+### 4. Git sync pipeline
+
+```
+git repo
+  → read repo_path + last_commit
+  → optional git pull --ff-only
+  → validate ancestry
+  → git diff --name-status -M last..HEAD
+  → buildSyncManifest
+  → isSyncable(markdown|code|false)
+  → delete removed pages
+  → rename moved pages
+  → import added/modified files one by one
+  → record sync failures if any file fails
+  → advance sync anchor only on success (or explicit --skip-failed)
+  → optional extract links/timeline
+  → optional embed changed pages
+```
+
+Key properties:
+
+- Per-file atomicity, not one giant transaction.
+- Broken files block bookmark advancement instead of silently disappearing from future syncs.
+- `--retry-failed` and `--skip-failed` make failure recovery explicit.
+- `--include-code` gates code ingestion cleanly rather than mixing file classes by default.
+
+### 5. Search pipeline
+
+```
+query/search
+  → classify intent
+  → auto-pick detail level
+  → detect code-like query or page-type filter
+  → keyword search (english for markdown, simple for code)
+  → optional vector search (if embeddings/API key available)
+  → optional multi-query expansion
+  → RRF fusion
+  → cosine re-score
+  → compiled-truth boost
+  → backlink boost
+  → source-aware dedup
+  → top-k results
+```
+
+There are really two search surfaces:
+
+- `gbrain search`: deterministic full-text entrypoint, fast, no embedding required.
+- `gbrain query`: hybrid retrieval entrypoint, uses the whole ranking stack.
+
+Both share the same chunk and page model, so markdown and code can coexist in one result set.
+
+### 6. Graph pipeline
+
+```
+page write / extract job / code import
+  → derive typed links
+  → store in links with provenance
+  → graph-query / backlinks / orphans / backlink boost consume those links
+```
+
+Graph producers:
+
+- Markdown auto-linking on write.
+- Batch `gbrain extract links|timeline|all`.
+- Code reference extraction during code import.
+
+Graph consumers:
+
+- `graph-query` recursive traversal.
+- `get_backlinks` and ranking boosts.
+- `orphans` for maintenance and coverage audits.
+- Agent workflows that need typed relationships, not just fuzzy retrieval.
+
+### 7. File and blob pipeline
+
+```
+local binary file
+  → files upload/mirror/sync
+  → storage backend (S3 / Supabase Storage / local)
+  → files ledger row with hash + mime + metadata
+  → optional redirect pointer in repo
+  → restore/verify/clean operations
+```
+
+This keeps the brain repo readable while letting large media live in durable object storage. The page graph stays in Postgres; the bytes live in storage.
+
+### 8. Minions and durable agent pipeline
+
+```
+skill / cron / operator action
+  → jobs submit
+  → minion_jobs row + attempts ledger
+  → worker claim / heartbeat / renew lock
+  → handler executes (shell, subagent, built-ins)
+  → complete / fail / retry / stall rescue
+  → stats / logs / child_done inbox / parent aggregation
+```
+
+Key properties:
+
+- Postgres-native durability.
+- Parent/child DAG support.
+- Timeouts, backoff, idempotency keys, max-stalled rescue.
+- Deterministic work routes here instead of burning LLM tokens on background execution.
+
+### 9. Health and maintenance pipeline
+
+```
+doctor / maintain / check-resolvable / jobs smoke / skillpack-check
+  → schema + config + engine checks
+  → embedding coverage / sync failure / orphan / dead-link checks
+  → resolver + skills-tree conformance checks
+  → optional auto-fixes for safe classes of drift
+```
+
+This is what keeps the system maintainable over time. GBrain assumes derived state will drift, then gives you commands to detect and repair it rather than pretending drift never happens.
+
+### 10. Full system view
+
+```
+Signals in
+  → skills decide what workflow to run
+  → operations.ts provides the stable tool contract
+  → import/write/sync pipelines normalize data into pages/chunks/links
+  → search/graph/files/jobs consume the same normalized state
+  → maintain/doctor verify health and repair drift
+  → better context for the next agent turn
+```
+
+The design goal is deliberate: add capabilities by extending shared pipelines, not by spawning one-off subsystems. That is what keeps later changes cheap.
+
 ## The Knowledge Model
 
 Every page follows the compiled truth + timeline pattern:
@@ -385,7 +590,7 @@ Then ask graph questions or watch the search ranking improve. Benchmarked: **Rec
 
 ## Code-Aware Brain
 
-Code files become brain pages. Code symbols become chunk metadata. Import/call relationships become links. Every existing table and pipeline is reused — no parallel system, no new search engine, no new graph. One query surface for markdown and code.
+Code files become brain pages. Code symbols become chunk metadata. Import/call relationships become links. The important part is architectural: code support extends the same `pages` / `content_chunks` / `links` / `search` stack described in [End-to-End Pipelines](#end-to-end-pipelines), instead of creating a separate code subsystem.
 
 The design is layering, not forking:
 
@@ -410,42 +615,7 @@ Code file ────→ pages (type='code_file') ──→ chunks (source='sou
 | **page_versions** | Code file history tracked through the existing versioning system. |
 | **sync** | `isSyncable()` returns `'markdown' | 'code' | false`. `--include-code` flag on `import` and `sync` gates code ingestion. |
 
-### Import pipeline
-
-```
-Source file (.ts, .py, .go, etc.)
-  → detectCodeLanguage (extension map: 17 languages)
-  → codePathToSlug: src/core/import-file.ts → code/src/core/import-file
-  → chunkCode: blank-line + indentation-aware splitter (40-80 lines, 5-line overlap)
-  → extractSymbols: regex-based (function, class, interface, type, const, method)
-  → extractReferences: import resolution + local call detection + extends/implements
-  → embedBatch: OpenAI embeddings on chunk text
-  → transaction:
-      putPage (type=code_file, compiled_truth=raw source)
-      addTag (language)
-      upsertChunks (chunk_source=source_code, symbol metadata)
-      DELETE + addLinksBatch (code_import edges, reconciliation)
-```
-
-### Query pipeline
-
-```
-"where is putPage defined?"
-  → classifyQueryIntent: code_definition (regex patterns, zero LLM)
-  → intentToDetail: 'low' (prefer signature-level chunks)
-  → isCodeLikeQuery: camelCase/snake_case/path-like/keyword → true
-  → searchKeyword routes to code_search_vector ('simple' config, no stemming)
-  → results ranked by ts_rank + symbol_name exact match boost +
-    ILIKE substring boost + chunk_index ordering
-```
-
-```
-"who calls putPage?"
-  → classifyQueryIntent: code_relationship
-  → intentToDetail: 'high' (need broad context)
-  → gbrain graph-query code/src/core/operations --type calls --direction in
-  → recursive CTE over links WHERE link_source = 'code_import'
-```
+The concrete flow is covered above in the dedicated code import, search, and graph pipeline sections. This section keeps the invariants and command surface in one place.
 
 ### Cross-type linking (code ↔ markdown)
 
@@ -499,20 +669,16 @@ gbrain orphans --type code_file
 
 ## Search
 
-Hybrid search: vector + keyword + RRF fusion + multi-query expansion + 4-layer dedup.
+The detailed search path is documented in [End-to-End Pipelines](#end-to-end-pipelines). In short, GBrain stacks intent detection, keyword search, optional vector retrieval, RRF fusion, cosine re-scoring, boosts, and dedup on top of the same normalized page/chunk model.
 
-```
-Query
-  -> Intent classifier (entity? temporal? event? general?)
-  -> Multi-query expansion (Claude Haiku)
-  -> Vector search (HNSW cosine) + Keyword search (tsvector)
-  -> RRF fusion: score = sum(1/(60 + rank))
-  -> Cosine re-scoring + compiled truth boost
-  -> 4-layer dedup + compiled truth guarantee
-  -> Results
-```
+Why the stack matters:
 
-Keyword alone misses conceptual matches. Vector alone misses exact phrases. RRF gets both. Search quality is benchmarked and reproducible: `gbrain eval --qrels queries.json` measures P@k, Recall@k, MRR, and nDCG@k. A/B test config changes before deploying them.
+- Keyword alone misses conceptual matches.
+- Vector alone misses exact identifiers, slugs, and phrasing.
+- RRF plus boosts gets both precision and recall.
+- The same search entrypoint can rank markdown and code together.
+
+Search quality is benchmarked and reproducible: `gbrain eval --qrels queries.json` measures P@k, Recall@k, MRR, and nDCG@k. A/B test config changes before deploying them.
 
 ## Why it works: many strategies in concert
 

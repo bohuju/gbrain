@@ -10,6 +10,11 @@ export interface CodeReference {
   lineNumber: number;
 }
 
+interface ImportedBinding {
+  localName: string;
+  toPath: string;
+}
+
 function lineNumberAt(source: string, offset: number): number {
   let line = 1;
   for (let i = 0; i < offset; i++) {
@@ -51,6 +56,46 @@ function pushImportRefs(source: string, filePath: string, refs: CodeReference[],
   }
 }
 
+function collectImportedBindings(source: string, filePath: string): ImportedBinding[] {
+  const bindings: ImportedBinding[] = [];
+  const push = (localName: string, specifier: string) => {
+    const toPath = resolveImportPath(filePath, specifier);
+    if (!toPath || !localName) return;
+    bindings.push({ localName, toPath });
+  };
+
+  let match: RegExpExecArray | null;
+  const esmRe = /\bimport\s+([\s\S]*?)\s+from\s+['"]([^'"]+)['"]/g;
+  while ((match = esmRe.exec(source)) !== null) {
+    const clause = match[1].trim();
+    const specifier = match[2];
+    if (!specifier.startsWith('.')) continue;
+
+    const namedMatch = clause.match(/\{([^}]+)\}/);
+    if (namedMatch) {
+      for (const entry of namedMatch[1].split(',')) {
+        const trimmed = entry.trim();
+        if (!trimmed) continue;
+        const alias = trimmed.match(/^([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?$/);
+        if (!alias) continue;
+        push(alias[2] || alias[1], specifier);
+      }
+    }
+
+    const defaultClause = clause.replace(/\{[\s\S]*\}/, '').split(',')[0]?.trim();
+    if (defaultClause && defaultClause !== '*' && /^[A-Za-z_$][\w$]*$/.test(defaultClause)) {
+      push(defaultClause, specifier);
+    }
+  }
+
+  const requireRe = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)/g;
+  while ((match = requireRe.exec(source)) !== null) {
+    push(match[1], match[2]);
+  }
+
+  return bindings;
+}
+
 function pushLocalCallRefs(source: string, filePath: string, refs: CodeReference[], localSymbols: Set<string>): void {
   if (localSymbols.size === 0) return;
 
@@ -80,6 +125,40 @@ function pushLocalCallRefs(source: string, filePath: string, refs: CodeReference
   }
 }
 
+function pushImportedCallRefs(
+  source: string,
+  filePath: string,
+  refs: CodeReference[],
+  importedBindings: ImportedBinding[],
+  localSymbols: Set<string>,
+): void {
+  if (importedBindings.length === 0) return;
+
+  const bindingMap = new Map(importedBindings.map(binding => [binding.localName, binding.toPath]));
+  const callRe = /\b([A-Za-z_$][\w$]*)\s*\(/g;
+  let match: RegExpExecArray | null;
+  while ((match = callRe.exec(source)) !== null) {
+    const name = match[1];
+    const toPath = bindingMap.get(name);
+    if (!toPath || localSymbols.has(name)) continue;
+
+    const nameOffset = match.index;
+    const prevChar = source[nameOffset - 1];
+    if (prevChar === '.' || prevChar === ':') continue;
+
+    const lineStart = source.lastIndexOf('\n', nameOffset) + 1;
+    const beforeName = source.slice(lineStart, nameOffset);
+    if (/\b(import|function|def|func|class|interface|type)\s+$/.test(beforeName)) continue;
+
+    refs.push({
+      fromPath: codePathToSlug(filePath),
+      toPath,
+      refType: 'calls',
+      lineNumber: lineNumberAt(source, match.index),
+    });
+  }
+}
+
 export async function extractReferences(
   source: string,
   language: string,
@@ -88,6 +167,9 @@ export async function extractReferences(
 ): Promise<CodeReference[]> {
   const refs: CodeReference[] = [];
   const lang = language.toLowerCase();
+  const importedBindings = ['typescript', 'javascript', 'tsx', 'jsx'].includes(lang)
+    ? collectImportedBindings(source, filePath)
+    : [];
 
   if (['typescript', 'javascript', 'tsx', 'jsx'].includes(lang)) {
     pushImportRefs(source, filePath, refs, [
@@ -108,6 +190,7 @@ export async function extractReferences(
       if (!localSymbols.has(match[1])) continue;
       refs.push({ fromPath: codePathToSlug(filePath), toPath: codePathToSlug(filePath), refType: 'implements', lineNumber: lineNumberAt(source, match.index) });
     }
+    pushImportedCallRefs(source, filePath, refs, importedBindings, localSymbols);
     pushLocalCallRefs(source, filePath, refs, localSymbols);
   } else if (lang === 'python') {
     pushImportRefs(source, filePath, refs, [

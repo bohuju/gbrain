@@ -75,4 +75,26 @@ describe('extractReferences', () => {
     });
     expect(refs.filter(r => r.refType === 'calls')).toHaveLength(1);
   });
+
+  test('extracts direct calls to imported relative bindings', async () => {
+    const refs = await extractReferences(
+      [
+        "import { helper as localHelper } from './helper';",
+        '',
+        'export function run() {',
+        '  return localHelper();',
+        '}',
+      ].join('\n'),
+      'typescript',
+      'src/core/importer.ts',
+      new Set(['run']),
+    );
+
+    expect(refs).toContainEqual({
+      fromPath: 'code/src/core/importer',
+      toPath: 'code/src/core/helper',
+      refType: 'calls',
+      lineNumber: 4,
+    });
+  });
 });
