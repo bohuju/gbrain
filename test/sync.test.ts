@@ -57,21 +57,28 @@ describe('buildSyncManifest', () => {
 
 describe('isSyncable', () => {
   test('accepts normal .md files', () => {
-    expect(isSyncable('people/pedro-franceschi.md')).toBe(true);
-    expect(isSyncable('meetings/2026-04-03-lunch.md')).toBe(true);
-    expect(isSyncable('daily/2026-04-05.md')).toBe(true);
-    expect(isSyncable('notes.md')).toBe(true);
+    expect(isSyncable('people/pedro-franceschi.md')).toBe('markdown');
+    expect(isSyncable('meetings/2026-04-03-lunch.md')).toBe('markdown');
+    expect(isSyncable('daily/2026-04-05.md')).toBe('markdown');
+    expect(isSyncable('notes.md')).toBe('markdown');
   });
 
   test('accepts .mdx files', () => {
-    expect(isSyncable('components/hero.mdx')).toBe(true);
-    expect(isSyncable('docs/getting-started.mdx')).toBe(true);
+    expect(isSyncable('components/hero.mdx')).toBe('markdown');
+    expect(isSyncable('docs/getting-started.mdx')).toBe('markdown');
   });
 
   test('rejects non-.md/.mdx files', () => {
     expect(isSyncable('people/photo.jpg')).toBe(false);
     expect(isSyncable('config.json')).toBe(false);
     expect(isSyncable('src/cli.ts')).toBe(false);
+  });
+
+  test('accepts code files only when includeCode is set', () => {
+    expect(isSyncable('src/cli.ts')).toBe(false);
+    expect(isSyncable('src/cli.ts', { includeCode: true })).toBe('code');
+    expect(isSyncable('src/components/App.tsx', { includeCode: true })).toBe('code');
+    expect(isSyncable('scripts/load_data.py', { includeCode: true })).toBe('code');
   });
 
   test('rejects files in hidden directories', () => {
@@ -160,7 +167,7 @@ describe('isSyncable edge cases', () => {
   });
 
   test('accepts deeply nested .md files', () => {
-    expect(isSyncable('a/b/c/d/e/f/deep.md')).toBe(true);
+    expect(isSyncable('a/b/c/d/e/f/deep.md')).toBe('markdown');
   });
 
   test('rejects .md files inside nested hidden dirs', () => {

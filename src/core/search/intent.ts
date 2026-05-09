@@ -7,7 +7,7 @@
  * No LLM call, no API cost, no latency. Pattern matching on query text.
  */
 
-export type QueryIntent = 'entity' | 'temporal' | 'event' | 'general';
+export type QueryIntent = 'entity' | 'temporal' | 'event' | 'general' | 'code_definition' | 'code_relationship';
 
 // Temporal patterns: questions about when things happened, meeting history
 const TEMPORAL_PATTERNS = [
@@ -61,11 +61,28 @@ const FULL_CONTEXT_PATTERNS = [
   /\bgive\s+me\s+everything\b/i,
 ];
 
+const CODE_DEFINITION_PATTERNS = [
+  /where\s+is\s+.+\s+defined/i,
+  /definition\s+of\s+.+/i,
+  /find\s+(?:the\s+)?(?:function|class|method|interface|type)\s+.+/i,
+  /what\s+is\s+.+\s+(?:function|class|method|interface|type)/i,
+];
+
+const CODE_RELATIONSHIP_PATTERNS = [
+  /who\s+(?:calls|uses|imports|references)\s+.+/i,
+  /what\s+(?:calls|depends\s+on|references|imports)\s+.+/i,
+  /callers?\s+of\s+.+/i,
+  /what\s+depends\s+on\s+.+/i,
+];
+
 /**
  * Classify query intent from text patterns.
  * Returns the detected intent type.
  */
 export function classifyQueryIntent(query: string): QueryIntent {
+  if (CODE_RELATIONSHIP_PATTERNS.some(p => p.test(query))) return 'code_relationship';
+  if (CODE_DEFINITION_PATTERNS.some(p => p.test(query))) return 'code_definition';
+
   // Full context requests → treat as temporal (return everything)
   if (FULL_CONTEXT_PATTERNS.some(p => p.test(query))) return 'temporal';
 
@@ -86,6 +103,8 @@ export function classifyQueryIntent(query: string): QueryIntent {
  * Map query intent to detail level.
  *
  * entity   → 'low'    (compiled truth only, user wants the assessment)
+ * code_definition → 'low' (prefer the tight symbol/signature chunk)
+ * code_relationship → 'high' (needs broad context / graph in later phases)
  * temporal → 'high'   (need timeline, user wants dates/events)
  * event    → 'high'   (need timeline, user wants specific events)
  * general  → undefined (use default medium, let the boost handle it)
@@ -93,6 +112,8 @@ export function classifyQueryIntent(query: string): QueryIntent {
 export function intentToDetail(intent: QueryIntent): 'low' | 'medium' | 'high' | undefined {
   switch (intent) {
     case 'entity': return 'low';
+    case 'code_definition': return 'low';
+    case 'code_relationship': return 'high';
     case 'temporal': return 'high';
     case 'event': return 'high';
     case 'general': return undefined; // use default

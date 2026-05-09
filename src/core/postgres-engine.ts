@@ -18,6 +18,7 @@ import type {
 import { GBrainError } from './types.ts';
 import * as db from './db.ts';
 import { validateSlug, contentHash, rowToPage, rowToChunk, rowToSearchResult, parseEmbedding, tryParseEmbedding } from './utils.ts';
+import { isCodeLikeQuery } from './search/code-query.ts';
 
 export class PostgresEngine implements BrainEngine {
   readonly kind = 'postgres' as const;
@@ -203,6 +204,7 @@ export class PostgresEngine implements BrainEngine {
     }
 
     const detailLow = opts?.detail === 'low';
+    const codeQuery = type === 'code_file' || (!type && isCodeLikeQuery(query));
 
     // Search-only timeout: prevents DoS via expensive queries without
     // affecting long-running operations like embed --all or bulk import.
@@ -214,33 +216,62 @@ export class PostgresEngine implements BrainEngine {
     // `SET statement_timeout = 0` — disables the guard for them.
     const rows = await sql.begin(async sql => {
       await sql`SET LOCAL statement_timeout = '8s'`;
-      // CTE: rank pages by FTS score, then pick the best chunk per page in SQL
-      return await sql`
-        WITH ranked_pages AS (
-          SELECT p.id, p.slug, p.title, p.type,
-            ts_rank(p.search_vector, websearch_to_tsquery('english', ${query})) AS score
-          FROM pages p
-          WHERE p.search_vector @@ websearch_to_tsquery('english', ${query})
-            ${type ? sql`AND p.type = ${type}` : sql``}
-            ${excludeSlugs?.length ? sql`AND p.slug != ALL(${excludeSlugs})` : sql``}
+      if (codeQuery) {
+        return await sql`
+          WITH ranked_pages AS (
+            SELECT p.id, p.slug, p.title, p.type, p.source_id,
+              ts_rank(p.code_search_vector, websearch_to_tsquery('simple', ${query})) AS score
+            FROM pages p
+            WHERE p.code_search_vector @@ websearch_to_tsquery('simple', ${query})
+              ${type ? sql`AND p.type = ${type}` : sql``}
+              ${excludeSlugs?.length ? sql`AND p.slug != ALL(${excludeSlugs})` : sql``}
+            ORDER BY score DESC
+            LIMIT ${limit}
+            OFFSET ${offset}
+          ),
+          best_chunks AS (
+            SELECT DISTINCT ON (rp.slug)
+              rp.slug, rp.id as page_id, rp.title, rp.type, rp.source_id, rp.score,
+              cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source
+            FROM ranked_pages rp
+            JOIN content_chunks cc ON cc.page_id = rp.id
+            ${detailLow ? sql`WHERE cc.chunk_source IN ('compiled_truth', 'source_code')` : sql``}
+            ORDER BY rp.slug,
+              CASE WHEN cc.symbol_name = ${query} THEN 0 WHEN cc.chunk_text ILIKE ${'%' + query + '%'} THEN 1 ELSE 2 END,
+              cc.chunk_index
+          )
+          SELECT slug, page_id, title, type, source_id, chunk_id, chunk_index, chunk_text, chunk_source, score,
+            false AS stale
+          FROM best_chunks
           ORDER BY score DESC
-          LIMIT ${limit}
-          OFFSET ${offset}
-        ),
-        best_chunks AS (
-          SELECT DISTINCT ON (rp.slug)
-            rp.slug, rp.id as page_id, rp.title, rp.type, rp.score,
-            cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source
-          FROM ranked_pages rp
-          JOIN content_chunks cc ON cc.page_id = rp.id
-          ${detailLow ? sql`WHERE cc.chunk_source = 'compiled_truth'` : sql``}
-          ORDER BY rp.slug, cc.chunk_index
-        )
-        SELECT slug, page_id, title, type, chunk_id, chunk_index, chunk_text, chunk_source, score,
-          false AS stale
-        FROM best_chunks
-        ORDER BY score DESC
-      `;
+        `;
+      }
+      return await sql`
+          WITH ranked_pages AS (
+            SELECT p.id, p.slug, p.title, p.type, p.source_id,
+              ts_rank(p.search_vector, websearch_to_tsquery('english', ${query})) AS score
+            FROM pages p
+            WHERE p.search_vector @@ websearch_to_tsquery('english', ${query})
+              ${type ? sql`AND p.type = ${type}` : sql``}
+              ${excludeSlugs?.length ? sql`AND p.slug != ALL(${excludeSlugs})` : sql``}
+            ORDER BY score DESC
+            LIMIT ${limit}
+            OFFSET ${offset}
+          ),
+          best_chunks AS (
+            SELECT DISTINCT ON (rp.slug)
+              rp.slug, rp.id as page_id, rp.title, rp.type, rp.source_id, rp.score,
+              cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source
+            FROM ranked_pages rp
+            JOIN content_chunks cc ON cc.page_id = rp.id
+            ${detailLow ? sql`WHERE cc.chunk_source = 'compiled_truth'` : sql``}
+            ORDER BY rp.slug, cc.chunk_index
+          )
+          SELECT slug, page_id, title, type, source_id, chunk_id, chunk_index, chunk_text, chunk_source, score,
+            false AS stale
+          FROM best_chunks
+          ORDER BY score DESC
+        `;
     });
     return rows.map(rowToSearchResult);
   }
@@ -319,7 +350,7 @@ export class PostgresEngine implements BrainEngine {
 
     // Batch upsert: build a single multi-row INSERT ON CONFLICT statement
     // This avoids per-row round-trips and reduces lock contention under parallel workers
-    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at)';
+    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, start_line, end_line, symbol_name, symbol_kind)';
     const rows: string[] = [];
     const params: unknown[] = [];
     let paramIdx = 1;
@@ -330,11 +361,11 @@ export class PostgresEngine implements BrainEngine {
         : null;
 
       if (embeddingStr) {
-        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now())`);
-        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null);
+        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now(), $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
+        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null, chunk.start_line ?? null, chunk.end_line ?? null, chunk.symbol_name ?? null, chunk.symbol_kind ?? null);
       } else {
-        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL)`);
-        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, chunk.model || 'text-embedding-3-large', chunk.token_count || null);
+        rows.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
+        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, chunk.model || 'text-embedding-3-large', chunk.token_count || null, chunk.start_line ?? null, chunk.end_line ?? null, chunk.symbol_name ?? null, chunk.symbol_kind ?? null);
       }
     }
 
@@ -347,7 +378,11 @@ export class PostgresEngine implements BrainEngine {
          embedding = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.embedding ELSE COALESCE(EXCLUDED.embedding, content_chunks.embedding) END,
          model = COALESCE(EXCLUDED.model, content_chunks.model),
          token_count = EXCLUDED.token_count,
-         embedded_at = COALESCE(EXCLUDED.embedded_at, content_chunks.embedded_at)`,
+         embedded_at = COALESCE(EXCLUDED.embedded_at, content_chunks.embedded_at),
+         start_line = EXCLUDED.start_line,
+         end_line = EXCLUDED.end_line,
+         symbol_name = EXCLUDED.symbol_name,
+         symbol_kind = EXCLUDED.symbol_kind`,
       params as Parameters<typeof sql.unsafe>[1],
     );
   }

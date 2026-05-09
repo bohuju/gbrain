@@ -71,6 +71,28 @@ describe('extractEntityRefs', () => {
     expect(refs.length).toBe(1);
     expect(refs[0].dir).toBe('meetings');
   });
+
+  test('extracts code wikilinks with symbol anchors', () => {
+    const refs = extractEntityRefs('Entry point: [[code:src/core/import-file.ts#importFromContent]].');
+    expect(refs).toEqual([
+      { name: 'importFromContent', slug: 'code/src/core/import-file', dir: 'code' },
+    ]);
+  });
+
+  test('extracts code wikilinks with display text', () => {
+    const refs = extractEntityRefs('See [[code:src/core/import-file.ts#importFromContent|the importer]].');
+    expect(refs).toEqual([
+      { name: 'the importer', slug: 'code/src/core/import-file', dir: 'code' },
+    ]);
+  });
+
+  test('normalizes markdown and unqualified wiki links to code pages', () => {
+    const refs = extractEntityRefs('See [Importer](code/src/core/import-file.ts) and [[code/src/core/sync.ts#pathToSlug]].');
+    expect(refs.map(r => r.slug)).toEqual([
+      'code/src/core/import-file',
+      'code/src/core/sync',
+    ]);
+  });
 });
 
 // ─── extractPageLinks ──────────────────────────────────────────
@@ -673,4 +695,3 @@ describe("v0.18.0 migration v22 — links_resolution_type", () => {
     expect(v22!.sql).toContain("unqualified");
   });
 });
-

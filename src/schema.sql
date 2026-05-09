@@ -86,11 +86,16 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   model         TEXT    NOT NULL DEFAULT 'text-embedding-3-large',
   token_count   INTEGER,
   embedded_at   TIMESTAMPTZ,
+  start_line    INTEGER,
+  end_line      INTEGER,
+  symbol_name   TEXT,
+  symbol_kind   TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_page_index ON content_chunks(page_id, chunk_index);
 CREATE INDEX IF NOT EXISTS idx_chunks_page ON content_chunks(page_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_symbol_name ON content_chunks USING GIN(symbol_name gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON content_chunks USING hnsw (embedding vector_cosine_ops);
 
 -- ============================================================
@@ -113,7 +118,7 @@ CREATE TABLE IF NOT EXISTS links (
   to_page_id     INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
   link_type      TEXT    NOT NULL DEFAULT '',
   context        TEXT    NOT NULL DEFAULT '',
-  link_source    TEXT    CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual')),
+  link_source    TEXT    CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual', 'code_import')),
   origin_page_id INTEGER REFERENCES pages(id) ON DELETE SET NULL,
   origin_field   TEXT,
   -- v0.18.0 Step 4: 'qualified' when the link was written as
@@ -306,8 +311,10 @@ CREATE INDEX IF NOT EXISTS idx_file_migration_ledger_status
 -- Trigger-based search_vector (spans pages + timeline_entries)
 -- ============================================================
 ALTER TABLE pages ADD COLUMN IF NOT EXISTS search_vector tsvector;
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS code_search_vector tsvector;
 
 CREATE INDEX IF NOT EXISTS idx_pages_search ON pages USING GIN(search_vector);
+CREATE INDEX IF NOT EXISTS idx_pages_code_search ON pages USING GIN(code_search_vector);
 
 -- Function to rebuild search_vector for a page
 CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger AS $$
@@ -320,12 +327,19 @@ BEGIN
   FROM timeline_entries
   WHERE page_id = NEW.id;
 
-  -- Build weighted tsvector
-  NEW.search_vector :=
-    setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A') ||
-    setweight(to_tsvector('english', coalesce(NEW.compiled_truth, '')), 'B') ||
-    setweight(to_tsvector('english', coalesce(NEW.timeline, '')), 'C') ||
-    setweight(to_tsvector('english', coalesce(timeline_text, '')), 'C');
+  IF NEW.type = 'code_file' THEN
+    NEW.search_vector := NULL;
+    NEW.code_search_vector :=
+      setweight(to_tsvector('simple', coalesce(NEW.title, '')), 'A') ||
+      setweight(to_tsvector('simple', coalesce(NEW.compiled_truth, '')), 'B');
+  ELSE
+    NEW.code_search_vector := NULL;
+    NEW.search_vector :=
+      setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A') ||
+      setweight(to_tsvector('english', coalesce(NEW.compiled_truth, '')), 'B') ||
+      setweight(to_tsvector('english', coalesce(NEW.timeline, '')), 'C') ||
+      setweight(to_tsvector('english', coalesce(timeline_text, '')), 'C');
+  END IF;
 
   RETURN NEW;
 END;

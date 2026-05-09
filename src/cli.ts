@@ -19,7 +19,7 @@ for (const op of operations) {
 }
 
 // CLI-only commands that bypass the operation layer
-const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'dream', 'check-resolvable']);
+const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'dream', 'check-resolvable', 'code', 'analyze-repo']);
 
 async function main() {
   // Parse global flags (--quiet / --progress-json / --progress-interval)
@@ -295,6 +295,11 @@ async function handleCliOnly(command: string, args: string[]) {
     await runIntegrity(args);
     return;
   }
+  if (command === 'analyze-repo') {
+    const { run } = await import('./commands/analyze-repo.ts');
+    await run(args);
+    return;
+  }
   if (command === 'publish') {
     const { runPublish } = await import('./commands/publish.ts');
     await runPublish(args);
@@ -399,6 +404,11 @@ async function handleCliOnly(command: string, args: string[]) {
       case 'files': {
         const { runFiles } = await import('./commands/files.ts');
         await runFiles(engine, args);
+        break;
+      }
+      case 'code': {
+        const { runCode } = await import('./commands/code.ts');
+        await runCode(engine, args);
         break;
       }
       case 'embed': {
@@ -540,13 +550,17 @@ SEARCH
   search <query>                     Keyword search (tsvector)
   query <question> [--no-expand]     Hybrid search (RRF + expansion)
   ask <question> [--no-expand]       Alias for query
+  code list [--tag T] [-n N]         List imported code files
+  code search <query> [-n N]         Search imported code only
 
 IMPORT/EXPORT
-  import <dir> [--no-embed]          Import markdown directory
-  sync [--repo <path>] [flags]       Git-to-brain incremental sync
+  import <dir> [--no-embed]          Import markdown directory (--include-code for code)
+  sync [--repo <path>] [flags]       Git-to-brain incremental sync (--include-code for code)
   sync --watch [--interval N]        Continuous sync (loops until stopped)
   sync --install-cron                Install persistent sync daemon
   export [--dir ./out/]              Export to markdown
+  analyze-repo <url|path> [--query]  Analyze repo and auto-generate docs (GitHub/GitLab/local)
+                                     --include-tests, --include-examples, --json
 
 FILES
   files list [slug]                  List stored files

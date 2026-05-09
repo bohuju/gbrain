@@ -3,10 +3,11 @@ import { execFileSync } from 'child_process';
 import { join, relative } from 'path';
 import { cpus, totalmem, homedir } from 'os';
 import type { BrainEngine } from '../core/engine.ts';
-import { importFile } from '../core/import-file.ts';
+import { importCodeFile, importFile } from '../core/import-file.ts';
 import { loadConfig } from '../core/config.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
+import { CODE_EXTENSIONS } from '../core/sync.ts';
 
 function defaultWorkers(): number {
   const cpuCount = cpus().length;
@@ -32,6 +33,7 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
   const noEmbed = args.includes('--no-embed');
   const fresh = args.includes('--fresh');
   const jsonOutput = args.includes('--json');
+  const includeCode = args.includes('--include-code');
   const workersIdx = args.indexOf('--workers');
   const workersArg = workersIdx !== -1 ? args[workersIdx + 1] : null;
   const workerCount = workersArg ? parseInt(workersArg, 10) : 1;
@@ -41,14 +43,14 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
   const dirArg = args.find((a, i) => !a.startsWith('--') && !flagValues.has(i));
 
   if (!dirArg) {
-    console.error('Usage: gbrain import <dir> [--no-embed] [--workers N] [--fresh] [--json]');
+    console.error('Usage: gbrain import <dir> [--no-embed] [--workers N] [--fresh] [--json] [--include-code]');
     process.exit(1);
   }
   const dir: string = dirArg;  // narrowed; survives closure capture
 
-  // Collect all .md files
-  const allFiles = collectMarkdownFiles(dir);
-  console.log(`Found ${allFiles.length} markdown files`);
+  // Collect all importable files
+  const allFiles = collectImportFiles(dir, { includeCode });
+  console.log(`Found ${allFiles.length} ${includeCode ? 'importable' : 'markdown'} files`);
 
   // Resume from checkpoint if available
   const checkpointPath = join(homedir(), '.gbrain', 'import-checkpoint.json');
@@ -95,7 +97,9 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
   async function processFile(eng: BrainEngine, filePath: string) {
     const relativePath = relative(dir, filePath);
     try {
-      const result = await importFile(eng, filePath, relativePath, { noEmbed });
+      const result = isCodeFile(relativePath)
+        ? await importCodeFile(eng, filePath, relativePath, { noEmbed })
+        : await importFile(eng, filePath, relativePath, { noEmbed });
       if (result.status === 'imported') {
         imported++;
         chunksCreated += result.chunks;
@@ -258,7 +262,7 @@ export async function runImport(engine: BrainEngine, args: string[], opts: { com
   return { imported, skipped, errors, chunksCreated, failures };
 }
 
-export function collectMarkdownFiles(dir: string): string[] {
+export function collectImportFiles(dir: string, opts: { includeCode?: boolean } = {}): string[] {
   const files: string[] = [];
 
   function walk(d: string) {
@@ -295,7 +299,7 @@ export function collectMarkdownFiles(dir: string): string[] {
 
       if (stat.isDirectory()) {
         walk(full);
-      } else if (entry.endsWith('.md') || entry.endsWith('.mdx')) {
+      } else if (entry.endsWith('.md') || entry.endsWith('.mdx') || (opts.includeCode && isCodeFile(entry))) {
         files.push(full);
       }
     }
@@ -303,4 +307,14 @@ export function collectMarkdownFiles(dir: string): string[] {
 
   walk(dir);
   return files.sort();
+}
+
+export function collectMarkdownFiles(dir: string): string[] {
+  return collectImportFiles(dir);
+}
+
+function isCodeFile(path: string): boolean {
+  const extIndex = path.lastIndexOf('.');
+  const ext = extIndex >= 0 ? path.slice(extIndex).toLowerCase() : '';
+  return CODE_EXTENSIONS.has(ext);
 }

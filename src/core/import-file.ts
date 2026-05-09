@@ -3,8 +3,11 @@ import { createHash } from 'crypto';
 import type { BrainEngine } from './engine.ts';
 import { parseMarkdown } from './markdown.ts';
 import { chunkText } from './chunkers/recursive.ts';
+import { chunkCode } from './chunkers/code.ts';
+import { extractSymbols } from './code/symbol-extractor.ts';
+import { extractReferences } from './code/reference-extractor.ts';
 import { embedBatch } from './embedding.ts';
-import { slugifyPath } from './sync.ts';
+import { slugifyCodePath, slugifyPath } from './sync.ts';
 import type { ChunkInput, PageType } from './types.ts';
 
 /**
@@ -35,7 +38,45 @@ export interface ImportResult {
   parsedPage?: ParsedPage;
 }
 
+export interface CodeImportResult {
+  slug: string;
+  status: 'imported' | 'skipped' | 'error';
+  chunks: number;
+  language: string;
+  error?: string;
+}
+
 const MAX_FILE_SIZE = 5_000_000; // 5MB
+
+const LANGUAGE_BY_EXTENSION: Record<string, string> = {
+  '.ts': 'typescript',
+  '.tsx': 'typescript',
+  '.js': 'javascript',
+  '.jsx': 'javascript',
+  '.mjs': 'javascript',
+  '.py': 'python',
+  '.go': 'go',
+  '.rs': 'rust',
+  '.java': 'java',
+  '.c': 'c',
+  '.cpp': 'cpp',
+  '.h': 'c',
+  '.rb': 'ruby',
+  '.swift': 'swift',
+  '.kt': 'kotlin',
+  '.sh': 'shell',
+  '.sql': 'sql',
+};
+
+export function detectCodeLanguage(filePath: string): string {
+  const extIndex = filePath.lastIndexOf('.');
+  const ext = extIndex >= 0 ? filePath.slice(extIndex).toLowerCase() : '';
+  return LANGUAGE_BY_EXTENSION[ext] || 'code';
+}
+
+export function codePathToSlug(relativePath: string): string {
+  return `code/${slugifyCodePath(relativePath)}`;
+}
 
 /**
  * Import content from a string. Core pipeline:
@@ -204,6 +245,145 @@ export async function importFromFile(
   // Pass the path-derived slug explicitly so that any future change to
   // parseMarkdown's precedence rules cannot re-introduce this bug.
   return importFromContent(engine, expectedSlug, content, opts);
+}
+
+export async function importCodeFile(
+  engine: BrainEngine,
+  filePath: string,
+  relativePath: string,
+  opts: { noEmbed?: boolean } = {},
+): Promise<CodeImportResult> {
+  const lstat = lstatSync(filePath);
+  if (lstat.isSymbolicLink()) {
+    return { slug: codePathToSlug(relativePath), status: 'skipped', chunks: 0, language: 'code', error: `Skipping symlink: ${filePath}` };
+  }
+
+  const stat = statSync(filePath);
+  if (stat.size > MAX_FILE_SIZE) {
+    return { slug: codePathToSlug(relativePath), status: 'skipped', chunks: 0, language: 'code', error: `File too large (${stat.size} bytes)` };
+  }
+
+  const content = readFileSync(filePath, 'utf-8');
+  const byteLength = Buffer.byteLength(content, 'utf-8');
+  const slug = codePathToSlug(relativePath);
+  const language = detectCodeLanguage(relativePath);
+  const frontmatter = {
+    language,
+    file_path: relativePath.replace(/\\/g, '/'),
+    size_bytes: byteLength,
+  };
+
+  const hash = createHash('sha256')
+    .update(JSON.stringify({
+      title: relativePath,
+      type: 'code_file',
+      compiled_truth: content,
+      timeline: '',
+      frontmatter,
+      tags: [language],
+    }))
+    .digest('hex');
+
+  const existing = await engine.getPage(slug);
+  if (existing?.content_hash === hash) {
+    return { slug, status: 'skipped', chunks: 0, language };
+  }
+
+  const symbols = await extractSymbols(content, language);
+  const references = await extractReferences(
+    content,
+    language,
+    relativePath,
+    new Set(symbols.map(s => s.name)),
+  );
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  const chunks: ChunkInput[] = [];
+  if (symbols.length > 0) {
+    for (const symbol of symbols) {
+      const symbolText = lines.slice(symbol.startLine - 1, symbol.endLine).join('\n');
+      const symbolChunks = chunkCode(symbolText, { maxLines: 80, overlapLines: 5 });
+      if (symbolChunks.length === 0) continue;
+      for (const chunk of symbolChunks) {
+        chunks.push({
+          chunk_index: chunks.length,
+          chunk_text: chunk.text,
+          chunk_source: 'source_code',
+          start_line: symbol.startLine + chunk.startLine - 1,
+          end_line: symbol.startLine + chunk.endLine - 1,
+          symbol_name: symbol.name,
+          symbol_kind: symbol.kind,
+        });
+      }
+    }
+  } else {
+    for (const chunk of chunkCode(content)) {
+      chunks.push({
+        chunk_index: chunks.length,
+        chunk_text: chunk.text,
+        chunk_source: 'source_code',
+        start_line: chunk.startLine,
+        end_line: chunk.endLine,
+      });
+    }
+  }
+
+  if (!opts.noEmbed && chunks.length > 0) {
+    try {
+      const embeddings = await embedBatch(chunks.map(c => c.chunk_text));
+      for (let i = 0; i < chunks.length; i++) {
+        chunks[i].embedding = embeddings[i];
+        chunks[i].token_count = Math.ceil(chunks[i].chunk_text.length / 4);
+      }
+    } catch (e: unknown) {
+      console.warn(`[gbrain] embedding failed for ${slug} (${chunks.length} chunks): ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  await engine.transaction(async (tx) => {
+    if (existing) await tx.createVersion(slug);
+
+    await tx.putPage(slug, {
+      type: 'code_file',
+      title: relativePath,
+      compiled_truth: content,
+      timeline: '',
+      frontmatter,
+      content_hash: hash,
+    });
+
+    const existingTags = await tx.getTags(slug);
+    for (const old of existingTags) {
+      if (old !== language) await tx.removeTag(slug, old);
+    }
+    await tx.addTag(slug, language);
+
+    if (chunks.length > 0) {
+      await tx.upsertChunks(slug, chunks);
+    } else {
+      await tx.deleteChunks(slug);
+    }
+
+    // Match the engine's removeLink pattern: slug-only subquery (no source_id filter)
+    // so the DELETE works regardless of which source the page belongs to.
+    await tx.executeRaw(
+      `DELETE FROM links
+       WHERE link_source = 'code_import'
+         AND from_page_id = (SELECT id FROM pages WHERE slug = $1)`,
+      [slug],
+    );
+    if (references.length > 0) {
+      await tx.addLinksBatch(references.map(ref => ({
+        from_slug: slug,
+        to_slug: ref.toPath,
+        link_type: ref.refType,
+        context: `${relativePath}:${ref.lineNumber}`,
+        link_source: 'code_import',
+        origin_slug: slug,
+      })));
+    }
+  });
+
+  return { slug, status: 'imported', chunks: chunks.length, language };
 }
 
 // Backward compat

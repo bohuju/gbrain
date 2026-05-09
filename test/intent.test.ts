@@ -139,6 +139,24 @@ describe('classifyQueryIntent', () => {
       expect(classifyQueryIntent('crypto web3 ownership')).toBe('general');
     });
   });
+
+  describe('code queries', () => {
+    test('"Where is putPage defined?" → code_definition', () => {
+      expect(classifyQueryIntent('Where is putPage defined?')).toBe('code_definition');
+    });
+
+    test('"Find the function importFromContent" → code_definition', () => {
+      expect(classifyQueryIntent('Find the function importFromContent')).toBe('code_definition');
+    });
+
+    test('"Who calls putPage?" → code_relationship', () => {
+      expect(classifyQueryIntent('Who calls putPage?')).toBe('code_relationship');
+    });
+
+    test('"What depends on importCodeFile?" → code_relationship', () => {
+      expect(classifyQueryIntent('What depends on importCodeFile?')).toBe('code_relationship');
+    });
+  });
 });
 
 describe('autoDetectDetail', () => {
@@ -159,5 +177,13 @@ describe('autoDetectDetail', () => {
   test('general queries → undefined (default)', () => {
     expect(autoDetectDetail('AI changes who gets to build')).toBeUndefined();
     expect(autoDetectDetail('fintech payments')).toBeUndefined();
+  });
+
+  test('code definition queries → low', () => {
+    expect(autoDetectDetail('Where is putPage defined?')).toBe('low');
+  });
+
+  test('code relationship queries → high', () => {
+    expect(autoDetectDetail('Who calls putPage?')).toBe('high');
   });
 });

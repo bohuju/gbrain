@@ -6,10 +6,12 @@
  *       │
  *   buildSyncManifest()  →  parse A/M/D/R lines
  *       │
- *   isSyncable()  →  filter to .md pages only
+ *   isSyncable()  →  filter to markdown pages, plus code when opted in
  *       │
  *   pathToSlug()  →  convert file paths to page slugs
  */
+
+export type SyncableKind = 'markdown' | 'code';
 
 export interface SyncManifest {
   added: string[];
@@ -23,6 +25,17 @@ export interface RawManifestEntry {
   path: string;
   oldPath?: string;
 }
+
+export interface SyncManifestEntry {
+  path: string;
+  kind: SyncableKind;
+}
+
+export const CODE_EXTENSIONS = new Set([
+  '.ts', '.tsx', '.js', '.jsx', '.mjs',
+  '.py', '.go', '.rs', '.java', '.c', '.cpp', '.h',
+  '.rb', '.swift', '.kt', '.sh', '.sql',
+]);
 
 /**
  * Parse the output of `git diff --name-status -M LAST..HEAD` into structured entries.
@@ -75,10 +88,7 @@ export function buildSyncManifest(gitDiffOutput: string): SyncManifest {
 /**
  * Filter a file path to determine if it should be synced to GBrain.
  */
-export function isSyncable(path: string): boolean {
-  // Must be .md or .mdx
-  if (!path.endsWith('.md') && !path.endsWith('.mdx')) return false;
-
+export function isSyncable(path: string, opts: { includeCode?: boolean } = {}): SyncableKind | false {
   // Skip hidden directories
   if (path.split('/').some(p => p.startsWith('.'))) return false;
 
@@ -93,7 +103,15 @@ export function isSyncable(path: string): boolean {
   // Skip ops/ directory
   if (path.startsWith('ops/')) return false;
 
-  return true;
+  if (path.endsWith('.md') || path.endsWith('.mdx')) return 'markdown';
+
+  if (opts.includeCode) {
+    const extIndex = path.lastIndexOf('.');
+    const ext = extIndex >= 0 ? path.slice(extIndex).toLowerCase() : '';
+    if (CODE_EXTENSIONS.has(ext)) return 'code';
+  }
+
+  return false;
 }
 
 /**
@@ -120,6 +138,13 @@ export function slugifySegment(segment: string): string {
  */
 export function slugifyPath(filePath: string): string {
   let path = filePath.replace(/\.mdx?$/i, '');
+  path = path.replace(/\\/g, '/');
+  path = path.replace(/^\.?\//, '');
+  return path.split('/').map(slugifySegment).filter(Boolean).join('/');
+}
+
+export function slugifyCodePath(filePath: string): string {
+  let path = filePath.replace(/\.[^.\/\\]+$/i, '');
   path = path.replace(/\\/g, '/');
   path = path.replace(/^\.?\//, '');
   return path.split('/').map(slugifySegment).filter(Boolean).join('/');

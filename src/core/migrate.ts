@@ -687,6 +687,53 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_cycle_locks_ttl ON gbrain_cycle_locks(ttl_expires_at);
     `,
   },
+  {
+    version: 24,
+    name: 'code_content_search_and_chunk_metadata',
+    sql: `
+      ALTER TABLE pages ADD COLUMN IF NOT EXISTS code_search_vector tsvector;
+      CREATE INDEX IF NOT EXISTS idx_pages_code_search ON pages USING GIN(code_search_vector);
+
+      ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS start_line INTEGER;
+      ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS end_line INTEGER;
+      ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS symbol_name TEXT;
+      ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS symbol_kind TEXT;
+      CREATE INDEX IF NOT EXISTS idx_chunks_symbol_name ON content_chunks USING GIN(symbol_name gin_trgm_ops);
+
+      ALTER TABLE links DROP CONSTRAINT IF EXISTS links_link_source_check;
+      ALTER TABLE links ADD CONSTRAINT links_link_source_check
+        CHECK (link_source IS NULL OR link_source IN ('markdown', 'frontmatter', 'manual', 'code_import'));
+
+      CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger AS $$
+      DECLARE
+        timeline_text TEXT;
+      BEGIN
+        SELECT coalesce(string_agg(summary || ' ' || detail, ' '), '')
+        INTO timeline_text
+        FROM timeline_entries
+        WHERE page_id = NEW.id;
+
+        IF NEW.type = 'code_file' THEN
+          NEW.search_vector := NULL;
+          NEW.code_search_vector :=
+            setweight(to_tsvector('simple', coalesce(NEW.title, '')), 'A') ||
+            setweight(to_tsvector('simple', coalesce(NEW.compiled_truth, '')), 'B');
+        ELSE
+          NEW.code_search_vector := NULL;
+          NEW.search_vector :=
+            setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A') ||
+            setweight(to_tsvector('english', coalesce(NEW.compiled_truth, '')), 'B') ||
+            setweight(to_tsvector('english', coalesce(NEW.timeline, '')), 'C') ||
+            setweight(to_tsvector('english', coalesce(timeline_text, '')), 'C');
+        END IF;
+
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      UPDATE pages SET updated_at = updated_at;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import type { Page, PageInput, PageType, Chunk, SearchResult } from './types.ts';
+import type { Page, PageInput, PageType, Chunk, SearchResult, ChunkSource } from './types.ts';
 
 /**
  * Validate and normalize a slug. Slugs are lowercased repo-relative paths.
@@ -116,11 +116,15 @@ export function rowToChunk(row: Record<string, unknown>, includeEmbedding = fals
     page_id: row.page_id as number,
     chunk_index: row.chunk_index as number,
     chunk_text: row.chunk_text as string,
-    chunk_source: row.chunk_source as 'compiled_truth' | 'timeline',
+    chunk_source: row.chunk_source as ChunkSource,
     embedding: includeEmbedding ? parseEmbedding(row.embedding) : null,
     model: row.model as string,
     token_count: row.token_count as number | null,
     embedded_at: row.embedded_at ? new Date(row.embedded_at as string) : null,
+    start_line: row.start_line as number | null | undefined,
+    end_line: row.end_line as number | null | undefined,
+    symbol_name: row.symbol_name as string | null | undefined,
+    symbol_kind: row.symbol_kind as string | null | undefined,
   };
 }
 
@@ -131,7 +135,7 @@ export function rowToSearchResult(row: Record<string, unknown>): SearchResult {
     title: row.title as string,
     type: row.type as PageType,
     chunk_text: row.chunk_text as string,
-    chunk_source: row.chunk_source as 'compiled_truth' | 'timeline',
+    chunk_source: row.chunk_source as ChunkSource,
     chunk_id: row.chunk_id as number,
     chunk_index: row.chunk_index as number,
     score: Number(row.score),

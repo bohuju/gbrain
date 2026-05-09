@@ -1,5 +1,6 @@
 // Page types
-export type PageType = 'person' | 'company' | 'deal' | 'yc' | 'civic' | 'project' | 'concept' | 'source' | 'media' | 'writing' | 'analysis' | 'guide' | 'hardware' | 'architecture' | 'meeting' | 'note';
+export type PageType = 'person' | 'company' | 'deal' | 'yc' | 'civic' | 'project' | 'concept' | 'source' | 'media' | 'writing' | 'analysis' | 'guide' | 'hardware' | 'architecture' | 'meeting' | 'note' | 'code_file';
+export type ChunkSource = 'compiled_truth' | 'timeline' | 'source_code';
 
 export interface Page {
   id: number;
@@ -38,20 +39,28 @@ export interface Chunk {
   page_id: number;
   chunk_index: number;
   chunk_text: string;
-  chunk_source: 'compiled_truth' | 'timeline';
+  chunk_source: ChunkSource;
   embedding: Float32Array | null;
   model: string;
   token_count: number | null;
   embedded_at: Date | null;
+  start_line?: number | null;
+  end_line?: number | null;
+  symbol_name?: string | null;
+  symbol_kind?: string | null;
 }
 
 export interface ChunkInput {
   chunk_index: number;
   chunk_text: string;
-  chunk_source: 'compiled_truth' | 'timeline';
+  chunk_source: ChunkSource;
   embedding?: Float32Array;
   model?: string;
   token_count?: number;
+  start_line?: number;
+  end_line?: number;
+  symbol_name?: string;
+  symbol_kind?: string;
 }
 
 // Search
@@ -61,7 +70,7 @@ export interface SearchResult {
   title: string;
   type: PageType;
   chunk_text: string;
-  chunk_source: 'compiled_truth' | 'timeline';
+  chunk_source: ChunkSource;
   chunk_id: number;
   chunk_index: number;
   score: number;

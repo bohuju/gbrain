@@ -14,6 +14,7 @@
 
 import type { BrainEngine } from './engine.ts';
 import type { PageType } from './types.ts';
+import { slugifyCodePath } from './sync.ts';
 
 // ─── Entity references ──────────────────────────────────────────
 
@@ -44,7 +45,7 @@ export type LinkResolutionType = 'qualified' | 'unqualified';
  *   - Our domain extensions: tech, finance, personal, openclaw (domain-organized wikis)
  *   - Our entity prefix: entities (we kept some legacy entities/projects/ pages)
  */
-const DIR_PATTERN = '(?:people|companies|meetings|concepts|deal|civic|project|projects|source|media|yc|tech|finance|personal|openclaw|entities)';
+const DIR_PATTERN = '(?:people|companies|meetings|concepts|deal|civic|project|projects|source|media|yc|tech|finance|personal|openclaw|entities|code)';
 
 /**
  * Match `[Name](path)` markdown links pointing to entity directories.
@@ -90,6 +91,8 @@ const QUALIFIED_WIKILINK_RE = new RegExp(
   `\\[\\[([a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?):(${DIR_PATTERN}\\/[^|\\]#]+?)(?:#[^|\\]]*?)?(?:\\|([^\\]]+?))?\\]\\]`,
   'g',
 );
+
+const CODE_WIKILINK_RE = /\[\[code:([^|\]#]+?)(?:#([^|\]]+?))?(?:\|([^\]]+?))?\]\]/g;
 
 /**
  * Strip fenced code blocks (```...```) and inline code (`...`) from markdown,
@@ -139,6 +142,18 @@ export function extractEntityRefs(content: string): EntityRef[] {
   const refs: EntityRef[] = [];
   let match: RegExpExecArray | null;
 
+  const codeRanges: Array<[number, number]> = [];
+  const codePattern = new RegExp(CODE_WIKILINK_RE.source, CODE_WIKILINK_RE.flags);
+  while ((match = codePattern.exec(stripped)) !== null) {
+    const rawPath = match[1].trim();
+    if (!rawPath || rawPath.includes('://')) continue;
+    const symbol = match[2]?.trim();
+    const displayName = (match[3] || symbol || rawPath).trim();
+    const slug = `code/${slugifyCodePath(rawPath)}`;
+    refs.push({ name: displayName, slug, dir: 'code' });
+    codeRanges.push([match.index, match.index + match[0].length]);
+  }
+
   // 1. Markdown links: [Name](path)
   //    Markdown links have no source-qualification syntax — they're
   //    always unqualified. Omit sourceId so the shape stays compatible
@@ -147,8 +162,8 @@ export function extractEntityRefs(content: string): EntityRef[] {
   while ((match = mdPattern.exec(stripped)) !== null) {
     const name = match[1];
     const fullPath = match[2];
-    const slug = fullPath;
     const dir = fullPath.split('/')[0];
+    const slug = normalizeExtractedSlug(fullPath);
     refs.push({ name, slug, dir });
   }
 
@@ -156,8 +171,9 @@ export function extractEntityRefs(content: string): EntityRef[] {
   //     Must run BEFORE the unqualified pass or we'd double-emit. We also
   //     mask out the matched spans so pass 2b can't grab them.
   const qualifiedRanges: Array<[number, number]> = [];
+  const qualifiedInput = maskRanges(stripped, codeRanges);
   const qualPattern = new RegExp(QUALIFIED_WIKILINK_RE.source, QUALIFIED_WIKILINK_RE.flags);
-  while ((match = qualPattern.exec(stripped)) !== null) {
+  while ((match = qualPattern.exec(qualifiedInput)) !== null) {
     const sourceId = match[1];
     let slug = match[2].trim();
     if (!slug) continue;
@@ -165,13 +181,14 @@ export function extractEntityRefs(content: string): EntityRef[] {
     if (slug.endsWith('.md')) slug = slug.slice(0, -3);
     const displayName = (match[3] || slug).trim();
     const dir = slug.split('/')[0];
+    slug = normalizeExtractedSlug(slug);
     refs.push({ name: displayName, slug, dir, sourceId });
     qualifiedRanges.push([match.index, match.index + match[0].length]);
   }
 
   // 2b. Unqualified Obsidian wikilinks: [[path]] or [[path|Display Text]]
   //     Same shape rule: omit sourceId when unqualified.
-  const unmasked = maskRanges(stripped, qualifiedRanges);
+  const unmasked = maskRanges(maskRanges(stripped, codeRanges), qualifiedRanges);
   const wikiPattern = new RegExp(WIKILINK_RE.source, WIKILINK_RE.flags);
   while ((match = wikiPattern.exec(unmasked)) !== null) {
     let slug = match[1].trim();
@@ -180,10 +197,16 @@ export function extractEntityRefs(content: string): EntityRef[] {
     if (slug.endsWith('.md')) slug = slug.slice(0, -3);
     const displayName = (match[2] || slug).trim();
     const dir = slug.split('/')[0];
+    slug = normalizeExtractedSlug(slug);
     refs.push({ name: displayName, slug, dir });
   }
 
   return refs;
+}
+
+function normalizeExtractedSlug(slug: string): string {
+  if (!slug.startsWith('code/')) return slug;
+  return `code/${slugifyCodePath(slug.slice('code/'.length))}`;
 }
 
 /**

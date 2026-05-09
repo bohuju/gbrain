@@ -2,7 +2,7 @@ import { existsSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { join, relative } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
-import { importFile } from '../core/import-file.ts';
+import { codePathToSlug, importCodeFile, importFile } from '../core/import-file.ts';
 import {
   buildSyncManifest,
   isSyncable,
@@ -41,6 +41,7 @@ export interface SyncOpts {
   skipFailed?: boolean;
   /** Bug 9 — re-attempt unacknowledged failures explicitly (CLI --retry-failed). */
   retryFailed?: boolean;
+  includeCode?: boolean;
   /**
    * v0.18.0 Step 5 — sync a specific named source. When set, sync reads
    * local_path + last_commit from the sources table (not the global
@@ -56,6 +57,12 @@ function git(repoPath: string, ...args: string[]): string {
     encoding: 'utf-8',
     timeout: 30000,
   }).trim();
+}
+
+function slugForSyncPath(path: string, includeCode?: boolean): string {
+  return includeCode && isSyncable(path, { includeCode }) === 'code'
+    ? codePathToSlug(path)
+    : pathToSlug(path);
 }
 
 // v0.18.0 Step 5: source-scoped sync state helpers. When opts.sourceId
@@ -186,16 +193,16 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
 
   // Filter to syncable files
   const filtered: SyncManifest = {
-    added: manifest.added.filter(p => isSyncable(p)),
-    modified: manifest.modified.filter(p => isSyncable(p)),
-    deleted: manifest.deleted.filter(p => isSyncable(p)),
-    renamed: manifest.renamed.filter(r => isSyncable(r.to)),
+    added: manifest.added.filter(p => isSyncable(p, { includeCode: opts.includeCode })),
+    modified: manifest.modified.filter(p => isSyncable(p, { includeCode: opts.includeCode })),
+    deleted: manifest.deleted.filter(p => isSyncable(p, { includeCode: opts.includeCode })),
+    renamed: manifest.renamed.filter(r => isSyncable(r.to, { includeCode: opts.includeCode })),
   };
 
   // Delete pages that became un-syncable (modified but filtered out)
-  const unsyncableModified = manifest.modified.filter(p => !isSyncable(p));
+  const unsyncableModified = manifest.modified.filter(p => !isSyncable(p, { includeCode: opts.includeCode }));
   for (const path of unsyncableModified) {
-    const slug = pathToSlug(path);
+    const slug = slugForSyncPath(path, opts.includeCode);
     try {
       const existing = await engine.getPage(slug);
       if (existing) {
@@ -262,7 +269,7 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
   if (filtered.deleted.length > 0) {
     progress.start('sync.deletes', filtered.deleted.length);
     for (const path of filtered.deleted) {
-      const slug = pathToSlug(path);
+      const slug = slugForSyncPath(path, opts.includeCode);
       await engine.deletePage(slug);
       pagesAffected.push(slug);
       progress.tick(1, slug);
@@ -274,8 +281,8 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
   if (filtered.renamed.length > 0) {
     progress.start('sync.renames', filtered.renamed.length);
     for (const { from, to } of filtered.renamed) {
-      const oldSlug = pathToSlug(from);
-      const newSlug = pathToSlug(to);
+      const oldSlug = slugForSyncPath(from, opts.includeCode);
+      const newSlug = slugForSyncPath(to, opts.includeCode);
       try {
         await engine.updateSlug(oldSlug, newSlug);
       } catch {
@@ -284,7 +291,9 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
       // Reimport at new path (picks up content changes)
       const filePath = join(repoPath, to);
       if (existsSync(filePath)) {
-        const result = await importFile(engine, filePath, to, { noEmbed });
+        const result = isSyncable(to, { includeCode: opts.includeCode }) === 'code'
+          ? await importCodeFile(engine, filePath, to, { noEmbed })
+          : await importFile(engine, filePath, to, { noEmbed });
         if (result.status === 'imported') chunksCreated += result.chunks;
       }
       pagesAffected.push(newSlug);
@@ -318,7 +327,9 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
         continue;
       }
       try {
-        const result = await importFile(engine, filePath, path, { noEmbed });
+        const result = isSyncable(path, { includeCode: opts.includeCode }) === 'code'
+          ? await importCodeFile(engine, filePath, path, { noEmbed })
+          : await importFile(engine, filePath, path, { noEmbed });
         if (result.status === 'imported') {
           chunksCreated += result.chunks;
           pagesAffected.push(result.slug);
@@ -440,11 +451,11 @@ async function performFullSync(
   // Fixes the silent-write-on-dry-run bug where performFullSync called
   // runImport unconditionally regardless of opts.dryRun.
   if (opts.dryRun) {
-    const { collectMarkdownFiles } = await import('./import.ts');
-    const allFiles = collectMarkdownFiles(repoPath);
+    const { collectImportFiles } = await import('./import.ts');
+    const allFiles = collectImportFiles(repoPath, { includeCode: opts.includeCode });
     const syncableRelPaths = allFiles
       .map(abs => relative(repoPath, abs))
-      .filter(rel => isSyncable(rel));
+      .filter(rel => isSyncable(rel, { includeCode: opts.includeCode }));
     console.log(
       `Full-sync dry run: ${syncableRelPaths.length} file(s) would be imported ` +
       `from ${repoPath} @ ${headCommit.slice(0, 8)}.`,
@@ -467,6 +478,7 @@ async function performFullSync(
   const { runImport } = await import('./import.ts');
   const importArgs = [repoPath];
   if (opts.noEmbed) importArgs.push('--no-embed');
+  if (opts.includeCode) importArgs.push('--include-code');
   const result = await runImport(engine, importArgs, { commit: headCommit });
 
   // Bug 9 — gate the full-sync bookmark on success. runImport already
@@ -541,6 +553,7 @@ export async function runSync(engine: BrainEngine, args: string[]) {
   const noEmbed = args.includes('--no-embed');
   const skipFailed = args.includes('--skip-failed');
   const retryFailed = args.includes('--retry-failed');
+  const includeCode = args.includes('--include-code');
 
   // v0.18.0 Step 5: --source resolves to a sources(id) row. Falls back
   // to pre-v0.17 global config (sync.repo_path + sync.last_commit) when
@@ -552,7 +565,7 @@ export async function runSync(engine: BrainEngine, args: string[]) {
     sourceId = await resolveSourceId(engine, explicitSource);
   }
 
-  const opts: SyncOpts = { repoPath, dryRun, full, noPull, noEmbed, skipFailed, retryFailed, sourceId };
+  const opts: SyncOpts = { repoPath, dryRun, full, noPull, noEmbed, skipFailed, retryFailed, includeCode, sourceId };
 
   // Bug 9 — --retry-failed: before running normal sync, clear acknowledgment
   // flags so the sync picks them up as fresh work. The actual re-attempt

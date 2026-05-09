@@ -20,6 +20,7 @@ import type {
   EngineConfig,
 } from './types.ts';
 import { validateSlug, contentHash, rowToPage, rowToChunk, rowToSearchResult } from './utils.ts';
+import { isCodeLikeQuery } from './search/code-query.ts';
 
 type PGLiteDB = PGlite;
 
@@ -202,7 +203,19 @@ export class PGLiteEngine implements BrainEngine {
   async searchKeyword(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
     const limit = clampSearchLimit(opts?.limit);
     const offset = opts?.offset || 0;
-    const detailFilter = opts?.detail === 'low' ? `AND cc.chunk_source = 'compiled_truth'` : '';
+    const type = opts?.type;
+    const excludeSlugs = opts?.exclude_slugs;
+    const codeQuery = type === 'code_file' || (!type && isCodeLikeQuery(query));
+    const detailFilter = opts?.detail === 'low'
+      ? (codeQuery ? `AND cc.chunk_source IN ('compiled_truth', 'source_code')` : `AND cc.chunk_source = 'compiled_truth'`)
+      : '';
+    const typeFilter = type ? `AND p.type = $4` : '';
+    const excludeFilter = excludeSlugs?.length ? `AND p.slug != ALL($${type ? 5 : 4}::text[])` : '';
+    const params: unknown[] = [query, limit, offset];
+    if (type) params.push(type);
+    if (excludeSlugs?.length) params.push(excludeSlugs);
+    const vectorColumn = codeQuery ? 'p.code_search_vector' : 'p.search_vector';
+    const config = codeQuery ? 'simple' : 'english';
 
     if (opts?.limit && opts.limit > MAX_SEARCH_LIMIT) {
       console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
@@ -212,17 +225,19 @@ export class PGLiteEngine implements BrainEngine {
       `SELECT
         p.slug, p.id as page_id, p.title, p.type, p.source_id,
         cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-        ts_rank(p.search_vector, websearch_to_tsquery('english', $1)) AS score,
+        ts_rank(${vectorColumn}, websearch_to_tsquery('${config}', $1)) AS score,
         CASE WHEN p.updated_at < (
           SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
         ) THEN true ELSE false END AS stale
       FROM pages p
       JOIN content_chunks cc ON cc.page_id = p.id
-      WHERE p.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}
-      ORDER BY score DESC
+      WHERE ${vectorColumn} @@ websearch_to_tsquery('${config}', $1) ${detailFilter} ${typeFilter} ${excludeFilter}
+      ORDER BY score DESC,
+        CASE WHEN cc.symbol_name = $1 THEN 0 WHEN cc.chunk_text ILIKE ('%' || $1 || '%') THEN 1 ELSE 2 END,
+        cc.chunk_index
       LIMIT $2
       OFFSET $3`,
-      [query, limit, offset]
+      params
     );
 
     return (rows as Record<string, unknown>[]).map(rowToSearchResult);
@@ -297,7 +312,7 @@ export class PGLiteEngine implements BrainEngine {
     }
 
     // Batch upsert: build dynamic multi-row INSERT
-    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at)';
+    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, start_line, end_line, symbol_name, symbol_kind)';
     const rowParts: string[] = [];
     const params: unknown[] = [];
     let paramIdx = 1;
@@ -308,11 +323,11 @@ export class PGLiteEngine implements BrainEngine {
         : null;
 
       if (embeddingStr) {
-        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now())`);
-        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null);
+        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}::vector, $${paramIdx++}, $${paramIdx++}, now(), $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
+        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, embeddingStr, chunk.model || 'text-embedding-3-large', chunk.token_count || null, chunk.start_line ?? null, chunk.end_line ?? null, chunk.symbol_name ?? null, chunk.symbol_kind ?? null);
       } else {
-        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL)`);
-        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, chunk.model || 'text-embedding-3-large', chunk.token_count || null);
+        rowParts.push(`($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, NULL, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++})`);
+        params.push(pageId, chunk.chunk_index, chunk.chunk_text, chunk.chunk_source, chunk.model || 'text-embedding-3-large', chunk.token_count || null, chunk.start_line ?? null, chunk.end_line ?? null, chunk.symbol_name ?? null, chunk.symbol_kind ?? null);
       }
     }
 
@@ -324,7 +339,11 @@ export class PGLiteEngine implements BrainEngine {
          embedding = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.embedding ELSE COALESCE(EXCLUDED.embedding, content_chunks.embedding) END,
          model = COALESCE(EXCLUDED.model, content_chunks.model),
          token_count = EXCLUDED.token_count,
-         embedded_at = COALESCE(EXCLUDED.embedded_at, content_chunks.embedded_at)`,
+         embedded_at = COALESCE(EXCLUDED.embedded_at, content_chunks.embedded_at),
+         start_line = EXCLUDED.start_line,
+         end_line = EXCLUDED.end_line,
+         symbol_name = EXCLUDED.symbol_name,
+         symbol_kind = EXCLUDED.symbol_kind`,
       params
     );
   }

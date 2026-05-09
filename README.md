@@ -383,6 +383,120 @@ gbrain extract timeline --source db     # extract dated events from markdown tim
 
 Then ask graph questions or watch the search ranking improve. Benchmarked: **Recall@5 jumps from 83% to 95%, Precision@5 from 39% to 45%, +30 more correct answers in the agent's top-5 reads** on a 240-page Opus-generated rich-prose corpus. Graph-only F1 hits 86.6% vs grep's 57.8% (+28.8 pts). See [docs/benchmarks/2026-04-18-brainbench-v1.md](docs/benchmarks/2026-04-18-brainbench-v1.md).
 
+## Code-Aware Brain
+
+Code files become brain pages. Code symbols become chunk metadata. Import/call relationships become links. Every existing table and pipeline is reused — no parallel system, no new search engine, no new graph. One query surface for markdown and code.
+
+The design is layering, not forking:
+
+```
+Markdown page ──→ pages (type='concept') ──→ chunks (source='compiled_truth')
+                                             ──→ links (source='markdown')
+
+Code file ────→ pages (type='code_file') ──→ chunks (source='source_code')
+                                             ──→ links (source='code_import')
+```
+
+### What gets reused
+
+| Layer | How code plugs in |
+|---|---|
+| **pages** | `type='code_file'`. Same table. `compiled_truth` holds raw source. `frontmatter` holds language, file path, byte size. Content hash gives idempotent re-import for free. |
+| **content_chunks** | `chunk_source='source_code'`. `symbol_name` and `symbol_kind` columns carry tree-sitter-free regex-extracted symbols (functions, classes, interfaces). `start_line` / `end_line` for precise display. |
+| **links** | `link_source='code_import'`. Import/call/extends/implements references become typed graph edges. Reconciliation works exactly like markdown links: re-import deletes stale `code_import` edges, re-extracts. |
+| **tags** | Language tags (`typescript`, `python`, `go`). Same tags table — `gbrain code list --tag typescript` just works. |
+| **search** | `code_search_vector` tsvector column on pages with `simple` config (no stemming — preserves `putPage`, path separators, camelCase identifiers). The trigger routes by page type: code pages get `simple` tsvector, markdown pages get `english`. |
+| **graph** | `traverse_graph` and `get_backlinks` recursive CTEs work on any link type. `gbrain graph-query code/src/core/operations --type calls --depth 2` traverses code references the same way as markdown references. |
+| **page_versions** | Code file history tracked through the existing versioning system. |
+| **sync** | `isSyncable()` returns `'markdown' | 'code' | false`. `--include-code` flag on `import` and `sync` gates code ingestion. |
+
+### Import pipeline
+
+```
+Source file (.ts, .py, .go, etc.)
+  → detectCodeLanguage (extension map: 17 languages)
+  → codePathToSlug: src/core/import-file.ts → code/src/core/import-file
+  → chunkCode: blank-line + indentation-aware splitter (40-80 lines, 5-line overlap)
+  → extractSymbols: regex-based (function, class, interface, type, const, method)
+  → extractReferences: import resolution + local call detection + extends/implements
+  → embedBatch: OpenAI embeddings on chunk text
+  → transaction:
+      putPage (type=code_file, compiled_truth=raw source)
+      addTag (language)
+      upsertChunks (chunk_source=source_code, symbol metadata)
+      DELETE + addLinksBatch (code_import edges, reconciliation)
+```
+
+### Query pipeline
+
+```
+"where is putPage defined?"
+  → classifyQueryIntent: code_definition (regex patterns, zero LLM)
+  → intentToDetail: 'low' (prefer signature-level chunks)
+  → isCodeLikeQuery: camelCase/snake_case/path-like/keyword → true
+  → searchKeyword routes to code_search_vector ('simple' config, no stemming)
+  → results ranked by ts_rank + symbol_name exact match boost +
+    ILIKE substring boost + chunk_index ordering
+```
+
+```
+"who calls putPage?"
+  → classifyQueryIntent: code_relationship
+  → intentToDetail: 'high' (need broad context)
+  → gbrain graph-query code/src/core/operations --type calls --direction in
+  → recursive CTE over links WHERE link_source = 'code_import'
+```
+
+### Cross-type linking (code ↔ markdown)
+
+Markdown pages reference code via wikilinks:
+
+```markdown
+The entry point is [[code:src/core/import-file.ts#importFromContent]].
+```
+
+This creates a bidirectional link: the markdown page links to the code page, and the code page gets a backlink. `graph-query` traverses across types without knowing the difference. Code pages with `link_type='tests'` edges surface test coverage through the same graph traversal that finds meeting attendees.
+
+### Commands
+
+```bash
+# Import code alongside markdown
+gbrain import ~/repo/ --include-code
+gbrain sync --include-code
+
+# List imported code files
+gbrain code list                          # all code files
+gbrain code list --tag typescript         # filter by language
+gbrain code list --json                   # machine-readable
+
+# Search code only (symbols, identifiers, paths)
+gbrain code search putPage
+gbrain code search "importFromContent" -n 10
+
+# General search finds code too (auto-detects code-like queries)
+gbrain search putPage                     # routes to code_search_vector automatically
+gbrain query "where is putPage defined"   # hybrid search, code_definition intent
+
+# Graph traversal across code
+gbrain graph-query code/src/core/operations --type calls --depth 2
+gbrain graph-query code/src/core/operations --type imports --direction in
+
+# Find code files with no inbound links (reuses find_orphans)
+gbrain orphans --type code_file
+```
+
+### Languages
+
+17 languages supported via extension detection: TypeScript, JavaScript, Python, Go, Rust, Java, C, C++, Ruby, Swift, Kotlin, Shell, SQL. Symbol extraction uses deterministic regex patterns (no tree-sitter dependency) for TypeScript/JavaScript, Python, and Go — other languages fall back to blank-line chunking without symbol metadata.
+
+### Design decisions
+
+**No tree-sitter.** Regex-based symbol extraction for the three dominant languages. Tree-sitter adds WASM bloat and a native compilation step for every new language. The regex approach covers functions, classes, interfaces, methods, type aliases, exports, and doc comments. Non-TS/Python/Go files still get chunked and searchable — they just don't get per-symbol metadata until a parser is added.
+
+**No parallel tables.** `code_repositories`, `code_symbols`, `code_references` — none exist. `sources` handles multi-repo. `pages` handles code files. `content_chunks` handles symbols. `links` handles references. Every search, graph, and admin command works on code content without a single new code path.
+
+**No new search engine.** The hybrid search pipeline is content-agnostic. `code_search_vector` with `simple` config preserves identifiers that `english` stemming would destroy. `isCodeLikeQuery` auto-detects code queries so `gbrain search putPage` routes correctly without the user specifying a type filter.
+
 ## Search
 
 Hybrid search: vector + keyword + RRF fusion + multi-query expansion + 4-layer dedup.
@@ -411,6 +525,9 @@ Question
   │
   ├─ INGESTION (every put_page)
   │    ├─ Recursive markdown chunking (or semantic / LLM-guided)
+  │    ├─ Code chunking: blank-line + indentation splitter (40-80 lines)
+  │    ├─ Symbol extraction: deterministic regex (functions, classes, interfaces)
+  │    ├─ Reference extraction: import resolution + call detection
   │    ├─ Embedding cache invalidation on edit
   │    └─ Idempotent imports (content-hash dedup)
   │
@@ -424,13 +541,16 @@ Question
   │    └─ Multi-type link constraint (same person can works_at AND advises)
   │
   ├─ SEARCH PIPELINE (every query)
-  │    ├─ Intent classifier (entity / temporal / event / general — auto-routes)
+  │    ├─ Intent classifier (entity / temporal / event / general
+  │    │                     / code_definition / code_relationship — auto-routes)
+  │    ├─ Code-query detector (camelCase, snake_case, path-like, keyword → simple tsvector)
   │    ├─ Multi-query expansion (Haiku rephrases the question 3 ways)
   │    ├─ Vector search (HNSW cosine over OpenAI embeddings)
-  │    ├─ Keyword search (Postgres tsvector + websearch_to_tsquery)
+  │    ├─ Keyword search (english tsvector for markdown, simple tsvector for code)
   │    ├─ Reciprocal Rank Fusion (score = sum 1/(60+rank) across both)
   │    ├─ Cosine re-scoring (re-rank chunks against actual query embedding)
   │    ├─ Compiled-truth boost (assessments outrank timeline noise)
+  │    ├─ Symbol-name exact match boost (code queries prefer exact identifier hits)
   │    ├─ Backlink boost (well-connected entities rank higher)
   │    └─ Source-aware dedup (one CT chunk per page guaranteed)
   │
@@ -531,13 +651,18 @@ PAGES
   gbrain list [--type T] [--tag T]      List with filters
 
 SEARCH
-  gbrain search <query>                 Keyword search (tsvector)
+  gbrain search <query>                 Keyword search (code-aware, auto-detects)
   gbrain query <question>              Hybrid search (vector + keyword + RRF)
+  gbrain code list [--tag T] [-n N]     List imported code files
+  gbrain code search <query> [-n N]     Search imported code only
 
 IMPORT
-  gbrain import <dir> [--no-embed]      Import markdown (idempotent)
+  gbrain import <dir> [--no-embed]      Import markdown (--include-code for code)
   gbrain sync [--repo <path>]           Git-to-brain incremental sync
+                                        (--include-code for code, --watch, --install-cron)
   gbrain export [--dir ./out/]          Export to markdown
+  gbrain analyze-repo <url|path>        Analyze repo, generate structured docs
+                                        (--include-tests, --query, --json)
 
 FILES
   gbrain files list|upload|sync|verify  File storage operations

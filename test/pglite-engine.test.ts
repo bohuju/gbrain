@@ -139,7 +139,7 @@ describe('PGLiteEngine: Pages', () => {
 // Search (tsvector triggers + FTS)
 // ─────────────────────────────────────────────────────────────────
 describe('PGLiteEngine: Search', () => {
-  beforeAll(async () => {
+  beforeEach(async () => {
     await truncateAll();
     await engine.putPage('companies/novamind', {
       type: 'company', title: 'NovaMind',
@@ -172,6 +172,22 @@ describe('PGLiteEngine: Search', () => {
     // Verify the PL/pgSQL trigger fires and search_vector is populated
     const results = await engine.searchKeyword('enterprise automation');
     expect(results.length).toBeGreaterThan(0);
+  });
+
+  test('searchKeyword finds code identifiers through code_search_vector', async () => {
+    await engine.putPage('code/src/core/operations', {
+      type: 'code_file',
+      title: 'src/core/operations.ts',
+      compiled_truth: 'export async function putPage() { return true; }',
+    });
+    await engine.upsertChunks('code/src/core/operations', [
+      { chunk_index: 0, chunk_text: 'export async function putPage() { return true; }', chunk_source: 'source_code', start_line: 1, end_line: 1 },
+    ]);
+
+    const results = await engine.searchKeyword('putPage');
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0].slug).toBe('code/src/core/operations');
+    expect(results[0].chunk_source).toBe('source_code');
   });
 
   test('searchVector returns empty when no embeddings', async () => {
@@ -647,7 +663,7 @@ describe('PGLiteEngine: IngestLog', () => {
 // Stats + Health
 // ─────────────────────────────────────────────────────────────────
 describe('PGLiteEngine: Stats & Health', () => {
-  beforeAll(async () => {
+  beforeEach(async () => {
     await truncateAll();
     await engine.putPage('test/stats', testPage);
     await engine.upsertChunks('test/stats', [
