@@ -6,7 +6,9 @@ export interface TaskDef {
   id: string;
   name: string;
   type: TaskType;
+  /** Absolute path to the task directory */
   dir: string;
+  /** List of file/directory paths within the project that the task touches */
   modules: string[];
 }
 
@@ -58,19 +60,27 @@ export interface AgentAdapter {
 // === Metrics ===
 
 export interface EfficiencyMetrics {
+  /** Min-max normalized tool-call rounds [0,1], higher is better. Normalized by pooling A+B results for the same task. */
   roundsNorm: number;
+  /** Min-max normalized wall-clock time [0,1], higher is better. Normalized by pooling A+B results for the same task. */
   timeNorm: number;
+  /** Min-max normalized token usage [0,1], higher is better. Normalized by pooling A+B results for the same task. */
   tokensNorm: number;
+  /** Weighted composite: 0.4*roundsNorm + 0.3*timeNorm + 0.3*tokensNorm */
   score: number;
 }
 
 // === Quality scoring ===
 
 export interface QualityDimensionScores {
-  correctness: number;  // 1-5
-  style: number;        // 1-5
-  edgeHandling: number; // 1-5
-  simplicity: number;   // 1-5
+  /** Correctness rating on a 1-5 scale */
+  correctness: number;
+  /** Code style rating on a 1-5 scale */
+  style: number;
+  /** Edge-case handling rating on a 1-5 scale */
+  edgeHandling: number;
+  /** Simplicity rating on a 1-5 scale */
+  simplicity: number;
 }
 
 export interface QualityResult {
@@ -117,12 +127,15 @@ export interface TaskRow {
 export interface ToolHeatmapEntry {
   tool: string;
   calls: number;
+  /** Number of distinct tasks that used this tool at least once */
   tasksCovered: number;
 }
 
 export interface BenchmarkReport {
   meta: {
+    /** GitHub repo path, e.g. "encode/starlette" */
     project: string;
+    /** Full commit SHA of the project at benchmark time */
     projectCommit: string;
     date: string;
     opencodeVersion: string;
