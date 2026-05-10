@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "gbrain": {
+      "type": "local",
+      "command": [
+        "gbrain",
+        "serve"
+      ],
+      "enabled": true,
+      "timeout": 30000
+    }
+  }
+}
