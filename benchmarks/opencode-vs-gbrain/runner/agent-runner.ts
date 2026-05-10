@@ -2,7 +2,7 @@ import { execSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentAdapter, AgentRunResult, GroupConfig, GroupLabel, TaskDef } from './types';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 
 const OPENCODE_CONFIG_PATH = join(homedir(), '.config', 'opencode', 'opencode.json');
 
@@ -18,9 +18,9 @@ interface OpencodeAdapterOptions {
 /**
  * OpenCode adapter that manages MCP config and invokes the agent.
  *
- * If opencode supports headless invocation (e.g. `opencode run --prompt <file>`),
- * set `opencodeCommand` to the command template. Otherwise, the adapter prepares
- * the environment and pauses for a manual session.
+ * If opencode supports headless invocation (e.g. `opencode run --prompt-file {promptFile}`),
+ * set `opencodeCommand` to the command template with `{promptFile}` placeholder.
+ * Otherwise, the adapter prepares the environment and pauses for a manual session.
  */
 export function createOpencodeAdapter(opts: OpencodeAdapterOptions): AgentAdapter {
   let groupLabel: GroupLabel = 'A';
@@ -44,21 +44,36 @@ export function createOpencodeAdapter(opts: OpencodeAdapterOptions): AgentAdapte
       // If Group B, run GBrain index
       if (config.needsGbrainIndex) {
         execSync('gbrain init', { cwd: opts.workDir, stdio: 'inherit' });
-        execSync('gbrain config set sync.repo_path ' + opts.workDir, { stdio: 'inherit' });
+        execSync(`gbrain config set sync.repo_path "${opts.workDir.replace(/"/g, '\\"')}"`, { stdio: 'inherit' });
         execSync('gbrain sync --force', { cwd: opts.workDir, stdio: 'inherit' });
         execSync('gbrain extract links', { cwd: opts.workDir, stdio: 'inherit' });
       }
     },
 
-    async runTask(task: TaskDef): Promise<AgentRunResult> {
+    async runTask(task: TaskDef, workDir: string): Promise<AgentRunResult> {
       const taskDir = join(opts.resultsDir, `group_${groupLabel.toLowerCase()}`, task.id);
       mkdirSync(taskDir, { recursive: true });
 
       // Apply seed patch
-      execSync(`git checkout -- . && git clean -fd && git apply ${join(task.dir, 'seed.patch')}`, {
-        cwd: opts.workDir,
-        stdio: 'pipe',
-      });
+      try {
+        execSync(`git checkout -- . && git clean -fd && git apply ${join(task.dir, 'seed.patch')}`, {
+          cwd: workDir,
+          stdio: 'pipe',
+        });
+      } catch (e) {
+        return {
+          taskId: task.id,
+          group: groupLabel,
+          success: 0,
+          toolCallCount: 0,
+          wallClockMs: 0,
+          tokensIn: 0,
+          tokensOut: 0,
+          outputDiff: '',
+          outputFiles: {},
+          logs: `seed.patch apply failed: ${e}`,
+        };
+      }
 
       const startTime = Date.now();
       const prompt = readFileSync(join(task.dir, 'prompt.md'), 'utf-8');
@@ -66,13 +81,15 @@ export function createOpencodeAdapter(opts: OpencodeAdapterOptions): AgentAdapte
 
       if (opts.opencodeCommand) {
         // Headless mode: invoke opencode programmatically
+        const promptFile = join(tmpdir(), `bench-task-${task.id}-${groupLabel.toLowerCase()}.md`);
+        writeFileSync(promptFile, prompt);
         const cmd = opts.opencodeCommand
-          .replace('{prompt}', prompt.replace(/'/g, "'\\''"))
-          .replace('{workDir}', opts.workDir)
+          .replace('{promptFile}', promptFile)
+          .replace('{workDir}', workDir)
           .replace('{logDir}', taskDir);
 
         const result = spawn('/bin/sh', ['-c', cmd], {
-          cwd: opts.workDir,
+          cwd: workDir,
           stdio: 'pipe',
         });
 
@@ -82,14 +99,18 @@ export function createOpencodeAdapter(opts: OpencodeAdapterOptions): AgentAdapte
         result.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
 
         await new Promise<void>((resolve, reject) => {
+          result.on('error', (err: Error) => {
+            reject(err);
+          });
           result.on('close', (code: number) => {
-            code === 0 ? resolve() : reject(new Error(`Agent exited with code ${code}`));
+            // Save logs before resolving — capture output regardless of exit code
+            writeFileSync(join(taskDir, 'session.log'), stdout + '\n' + stderr);
+            resolve(); // Always resolve — let verify.sh determine success
           });
         });
 
         const wallClockMs = Date.now() - startTime;
         const logs = stdout + '\n' + stderr;
-        writeFileSync(join(taskDir, 'session.log'), logs);
 
         // Parse metrics from agent output
         const toolCallCount = (logs.match(/tool_call|Tool call|invoking tool/gi) ?? []).length;
@@ -97,23 +118,23 @@ export function createOpencodeAdapter(opts: OpencodeAdapterOptions): AgentAdapte
         const tokensOut = extractNumber(logs, /output tokens?[:\s]+(\d+)/i);
 
         // Capture git diff
-        const outputDiff = execSync('git diff', { cwd: opts.workDir, encoding: 'utf-8' });
+        const outputDiff = execSync('git diff', { cwd: workDir, encoding: 'utf-8' });
         writeFileSync(join(taskDir, 'output.diff'), outputDiff);
 
         // List new files
         const newFiles = execSync('git ls-files --others --exclude-standard', {
-          cwd: opts.workDir,
+          cwd: workDir,
           encoding: 'utf-8',
         });
         const outputFiles: Record<string, string> = {};
         for (const f of newFiles.trim().split('\n').filter(Boolean)) {
           try {
-            outputFiles[f] = readFileSync(join(opts.workDir, f), 'utf-8');
+            outputFiles[f] = readFileSync(join(workDir, f), 'utf-8');
           } catch { /* binary or deleted */ }
         }
 
         // Run verify.sh, extract success score
-        const success = runVerify(join(task.dir, 'verify.sh'), opts.workDir, taskDir);
+        const success = runVerify(join(task.dir, 'verify.sh'), workDir, taskDir);
 
         // Parse GBrain tool usage (Group B only)
         const gbrainToolCalls = groupLabel === 'B' ? parseGbrainTools(logs) : undefined;
@@ -135,17 +156,17 @@ export function createOpencodeAdapter(opts: OpencodeAdapterOptions): AgentAdapte
         // Interactive mode: prepare environment, pause for manual run
         writeFileSync(join(taskDir, 'INSTRUCTIONS.md'),
           `# Task: ${task.id} — Group ${groupLabel}\n\n` +
-          `Working directory: ${opts.workDir}\n\n` +
+          `Working directory: ${workDir}\n\n` +
           `## Prompt\n\n${prompt}\n\n` +
           `## Steps\n` +
-          `1. Start opencode in directory ${opts.workDir}\n` +
+          `1. Start opencode in directory ${workDir}\n` +
           `2. Paste the prompt above\n` +
           `3. Let the agent work until it declares completion\n` +
           `4. Save the session transcript to: ${join(taskDir, 'session.log')}\n` +
           `5. Run: touch ${join(taskDir, 'DONE')}\n`);
 
         console.log(`\n[${groupLabel}] Task ${task.id} ready.`);
-        console.log(`  Work dir: ${opts.workDir}`);
+        console.log(`  Work dir: ${workDir}`);
         console.log(`  Instructions: ${join(taskDir, 'INSTRUCTIONS.md')}`);
         console.log(`  Waiting for: ${join(taskDir, 'DONE')}`);
 
@@ -163,8 +184,8 @@ export function createOpencodeAdapter(opts: OpencodeAdapterOptions): AgentAdapte
         const toolCallCount = (logs.match(/tool_call|Tool call|invoking tool/gi) ?? []).length;
         const tokensIn = extractNumber(logs, /input tokens?[:\s]+(\d+)/i);
         const tokensOut = extractNumber(logs, /output tokens?[:\s]+(\d+)/i);
-        const outputDiff = execSync('git diff', { cwd: opts.workDir, encoding: 'utf-8' });
-        const success = runVerify(join(task.dir, 'verify.sh'), opts.workDir, taskDir);
+        const outputDiff = execSync('git diff', { cwd: workDir, encoding: 'utf-8' });
+        const success = runVerify(join(task.dir, 'verify.sh'), workDir, taskDir);
         const gbrainToolCalls = groupLabel === 'B' ? parseGbrainTools(logs) : undefined;
 
         return {
