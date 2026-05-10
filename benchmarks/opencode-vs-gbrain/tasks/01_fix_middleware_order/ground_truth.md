@@ -2,23 +2,28 @@
 
 ## Root Cause
 
-The bug is in `starlette/applications.py` where the middleware stack is built. The user's middleware is being added at the wrong position or the stack is being built in reverse order.
+In `starlette/applications.py` line 101, `add_middleware()` uses `insert(0, ...)` to add new middleware. Combined with `reversed()` iteration in `build_middleware_stack()` (line 75), this ensures the correct onion order: last-registered middleware is innermost (closest to the endpoint).
 
-Specifically, in the `Starlette.__init__` method, `self.middleware_stack` is built from `self.user_middleware` but the order is incorrect -- either the list is iterated in reverse or the first middleware is treated as the outermost.
+The bug changes `insert(0, ...)` to `append(...)`, which breaks the relative ordering when multiple middleware are registered. The first-registered middleware becomes innermost instead of the last-registered.
 
 ## Correct Fix
 
-In `starlette/applications.py`, ensure that `user_middleware` is iterated in the order they were added (first added = outermost, last added = innermost, closest to the endpoint). The Starlette app itself should be the innermost ASGI app.
+In `starlette/applications.py` line 101, change:
 
-The fix should be:
-1. Locate where `self.middleware_stack` is built (typically using `ServerErrorMiddleware` and `ExceptionMiddleware` wrapping)
-2. Ensure user middleware are applied in FIFO order (first-registered is outermost)
-3. The stack should be: `ServerErrorMiddleware -> user_mw[0] -> user_mw[1] -> ... -> ExceptionMiddleware -> app_router`
+```python
+self.user_middleware.append(Middleware(middleware_class, *args, **kwargs))
+```
+
+back to:
+
+```python
+self.user_middleware.insert(0, Middleware(middleware_class, *args, **kwargs))
+```
 
 ## Key Files
-- `starlette/applications.py`: Starlette class init, middleware stack construction
+- `starlette/applications.py:101`: `add_middleware()` method
 
 ## Verification
-- Security header middleware must have its headers in the final response
-- Multiple middleware must execute in correct onion order
-- All existing tests must pass
+- Single middleware: header propagation works (bug is order-dependent, not detectable with one middleware)
+- Multiple middleware: first-registered runs before last-registered (reversed from expected onion)
+- After fix: all existing middleware tests must pass and multi-middleware order must be correct

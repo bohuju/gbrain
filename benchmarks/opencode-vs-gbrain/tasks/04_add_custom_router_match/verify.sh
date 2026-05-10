@@ -31,10 +31,10 @@ assert resp.text == "v1", f"Expected v1, got {resp.text}"
 
 print("PASS: Header routing works")
 PYEOF
-python /tmp/test_header_route.py || { echo "FAIL"; exit 1; }
+python3 /tmp/test_header_route.py || { echo "FAIL"; exit 1; }
 
 echo "=== Test 2: Backward compatibility ==="
 cd /tmp/starlette-bench
-python -m pytest tests/test_routing.py -x -q || { echo "FAIL: Existing routing tests"; exit 1; }
+python3 -m pytest tests/test_routing.py -x -q || { echo "FAIL: Existing routing tests"; exit 1; }
 
 exit 0

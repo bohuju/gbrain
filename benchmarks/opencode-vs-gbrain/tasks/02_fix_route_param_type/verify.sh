@@ -23,10 +23,10 @@ assert data["id"] == 42, f"Expected id=42, got {data['id']}"
 assert data["type"] == "int", f"Expected type=int, got {data['type']}"
 print("PASS: int convertor works")
 PYEOF
-python /tmp/test_convertor.py || { echo "FAIL"; exit 1; }
+python3 /tmp/test_convertor.py || { echo "FAIL"; exit 1; }
 
 echo "=== Test: Existing routing tests ==="
 cd /tmp/starlette-bench
-python -m pytest tests/test_routing.py -k "convertor" -x -q || { echo "FAIL: Existing convertor tests"; exit 1; }
+python3 -m pytest tests/test_convertors.py -x -q || { echo "FAIL: Existing convertor tests"; exit 1; }
 
 exit 0

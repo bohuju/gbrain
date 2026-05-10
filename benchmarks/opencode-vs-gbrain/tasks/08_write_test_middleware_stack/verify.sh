@@ -3,12 +3,12 @@ set -euo pipefail
 
 echo "=== Test: Middleware tests must pass ==="
 cd /tmp/starlette-bench
-python -m pytest tests/test_middleware.py -x -q || { echo "FAIL"; exit 1; }
+python3 -m pytest tests/middleware/test_middleware.py -x -q || { echo "FAIL"; exit 1; }
 
 echo "=== Test: Three new test functions must exist ==="
-python -c "
+python3 -c "
 import ast, sys
-with open('tests/test_middleware.py') as f:
+with open('tests/middleware/test_middleware.py') as f:
     tree = ast.parse(f.read())
 test_funcs = [n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')]
 order_test = any('order' in t.lower() for t in test_funcs)

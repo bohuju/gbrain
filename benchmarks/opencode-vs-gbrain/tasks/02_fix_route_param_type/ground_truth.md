@@ -2,19 +2,29 @@
 
 ## Root Cause
 
-In `starlette/routing.py`, when path parameters are extracted from a matched URL, the convertor's `to_python()` result may be discarded or the raw string from the regex match is used instead of the converted value.
+In `starlette/routing.py` line 246, the `Route.matches()` method skips calling `convert()` on path parameter values extracted from the URL regex match. The raw string from the regex match group is used directly instead of being converted through the parameter's Convertor.
+
+The convertor method invoked is `Convertor.convert(value)` (not `to_python()` — the method name in Starlette's codebase is `convert()`).
 
 ## Correct Fix
 
-In `starlette/routing.py`, locate the `Match` or parameter extraction logic in `BaseRoute` or `Route`. Ensure that after regex matching extracts parameter values as strings, each value is passed through the corresponding convertor's `to_python()` method before being stored in `path_params`.
+In `starlette/routing.py` line 246, change:
 
-The fix location is typically in the `matches()` method or wherever `path_params` is populated from regex match groups.
+```python
+matched_params[key] = value  # BUG: convertor.convert() skipped
+```
+
+back to:
+
+```python
+matched_params[key] = self.param_convertors[key].convert(value)
+```
 
 ## Key Files
-- `starlette/routing.py`: Route.matches(), parameter extraction
-- `starlette/convertors.py`: Convertor definitions (int, float, uuid, path)
+- `starlette/routing.py:246`: `Route.matches()` parameter extraction
+- `starlette/convertors.py`: Convertor definitions with `convert()` method
 
 ## Verification
-- `{param:int}` must produce an int in path_params
-- All other convertor types must continue to work
-- Existing convertor tests must pass
+- `{param:int}` must produce an int in path_params, not a string
+- All other convertor types (float, uuid, path) must continue to work
+- `tests/test_convertors.py` must pass (8 tests)
