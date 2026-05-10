@@ -41,11 +41,17 @@ export function createOpencodeAdapter(opts: OpencodeAdapterOptions): AgentAdapte
       const mcpConfig = readFileSync(config.mcpConfigPath, 'utf-8');
       writeFileSync(OPENCODE_CONFIG_PATH, mcpConfig);
 
-      // If Group B, run GBrain index
+      // If Group B, run GBrain index (skip embedding if no API key)
       if (config.needsGbrainIndex) {
         execSync('gbrain init', { cwd: opts.workDir, stdio: 'inherit' });
         execSync(`gbrain config set sync.repo_path "${opts.workDir.replace(/"/g, '\\"')}"`, { stdio: 'inherit' });
-        execSync('gbrain sync --force', { cwd: opts.workDir, stdio: 'inherit' });
+        // Import code files with keyword search only (no embedding API key needed)
+        try {
+          execSync('gbrain sync --force', { cwd: opts.workDir, stdio: 'inherit', timeout: 300_000 });
+        } catch {
+          // Fallback: import without embedding if sync fails (e.g. no OPENAI_API_KEY)
+          execSync(`gbrain import "${opts.workDir}" --include-code --no-embed`, { stdio: 'inherit', timeout: 120_000 });
+        }
         execSync('gbrain extract links', { cwd: opts.workDir, stdio: 'inherit' });
       }
     },
