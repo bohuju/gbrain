@@ -82,7 +82,11 @@ export function createOpencodeAdapter(opts: OpencodeAdapterOptions): AgentAdapte
       }
 
       const startTime = Date.now();
-      const prompt = readFileSync(join(task.dir, 'prompt.md'), 'utf-8');
+      // Group B uses GBrain-guided prompt if available
+      const promptFile = groupLabel === 'B'
+        ? (existsSync(join(task.dir, 'prompt_gb.md')) ? 'prompt_gb.md' : 'prompt.md')
+        : 'prompt.md';
+      const prompt = readFileSync(join(task.dir, promptFile), 'utf-8');
       writeFileSync(join(taskDir, 'prompt_used.md'), prompt);
 
       if (opts.opencodeCommand) {
