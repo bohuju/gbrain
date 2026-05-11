@@ -327,7 +327,7 @@ BEGIN
   FROM timeline_entries
   WHERE page_id = NEW.id;
 
-  IF NEW.type = 'code_file' THEN
+  IF NEW.type LIKE 'code_%' THEN
     NEW.search_vector := NULL;
     NEW.code_search_vector :=
       setweight(to_tsvector('simple', coalesce(NEW.title, '')), 'A') ||
