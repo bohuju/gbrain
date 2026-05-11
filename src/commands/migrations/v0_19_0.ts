@@ -1,56 +1,57 @@
-import type { BrainEngine } from '../../core/engine.ts';
+/**
+ * v0.19.0 migration — GitNexus code import integration.
+ *
+ * Schema changes:
+ *   - code_imports table: tracks GitNexus code graph import runs
+ *   - 'code' source row: federated code source for imported pages
+ *   - Updated search vector trigger: handles all code_* page types
+ *
+ * Idempotent: safe to re-run on partial state.
+ */
 
-export const v0_19_0 = {
-  version: 19,
-  async up(engine: BrainEngine): Promise<void> {
-    await engine.runMigration(19, `
-      CREATE TABLE IF NOT EXISTS code_imports (
-        id            SERIAL PRIMARY KEY,
-        repo_path     TEXT NOT NULL,
-        repo_commit   TEXT NOT NULL,
-        gitnexus_ver  TEXT NOT NULL DEFAULT '',
-        nodes_total   INTEGER NOT NULL DEFAULT 0,
-        edges_total   INTEGER NOT NULL DEFAULT 0,
-        chunks_total  INTEGER NOT NULL DEFAULT 0,
-        embedded      INTEGER NOT NULL DEFAULT 0,
-        status        TEXT NOT NULL DEFAULT 'importing',
-        error_text    TEXT,
-        started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-        finished_at   TIMESTAMPTZ,
-        CONSTRAINT chk_code_imports_status CHECK (status IN ('importing', 'embedded', 'done', 'failed'))
-      );
-      CREATE INDEX IF NOT EXISTS idx_code_imports_repo ON code_imports(repo_path, started_at DESC);
-      INSERT INTO sources (id, name, config)
-        VALUES ('code', 'code', '{"federated": true, "type": "code"}'::jsonb)
-        ON CONFLICT (id) DO NOTHING;
+import { execSync } from 'child_process';
+import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult } from './types.ts';
 
-      -- Update search vector trigger to handle all code_* page types
-      CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger AS $$
-      DECLARE
-        timeline_text TEXT;
-      BEGIN
-        SELECT coalesce(string_agg(summary || ' ' || detail, ' '), '')
-        INTO timeline_text
-        FROM timeline_entries
-        WHERE page_id = NEW.id;
+function runSchemaMigration(): OrchestratorPhaseResult {
+  try {
+    execSync('gbrain init --migrate-only', { stdio: 'inherit', timeout: 600_000, env: process.env });
+    return { name: 'schema', status: 'complete' };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { name: 'schema', status: 'failed', detail: msg };
+  }
+}
 
-        IF NEW.type LIKE 'code_%' THEN
-          NEW.search_vector := NULL;
-          NEW.code_search_vector :=
-            setweight(to_tsvector('simple', coalesce(NEW.title, '')), 'A') ||
-            setweight(to_tsvector('simple', coalesce(NEW.compiled_truth, '')), 'B');
-        ELSE
-          NEW.code_search_vector := NULL;
-          NEW.search_vector :=
-            setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A') ||
-            setweight(to_tsvector('english', coalesce(NEW.compiled_truth, '')), 'B') ||
-            setweight(to_tsvector('english', coalesce(NEW.timeline, '')), 'C') ||
-            setweight(to_tsvector('english', coalesce(timeline_text, '')), 'C');
-        END IF;
+async function orchestrator(opts: OrchestratorOpts): Promise<OrchestratorResult> {
+  console.log('');
+  console.log('=== v0.19.0 — GitNexus code import integration ===');
+  if (opts.dryRun) console.log('  (dry-run; no side effects)');
+  console.log('');
 
-        RETURN NEW;
-      END;
-      $$ LANGUAGE plpgsql;
-    `);
+  const phases: OrchestratorPhaseResult[] = [];
+
+  if (opts.dryRun) {
+    phases.push({ name: 'schema', status: 'skipped', detail: 'dry-run' });
+    return { version: '0.19.0', status: 'complete', phases };
+  }
+
+  const schema = runSchemaMigration();
+  phases.push(schema);
+
+  const status: 'complete' | 'failed' = schema.status === 'failed' ? 'failed' : 'complete';
+
+  return { version: '0.19.0', status, phases };
+}
+
+export const v0_19_0: Migration = {
+  version: '0.19.0',
+  featurePitch: {
+    headline: 'GitNexus integration: import code knowledge graphs into GBrain. Query code structure alongside your knowledge pages.',
+    description:
+      'v0.19.0 adds the code_imports table and "code" source, enabling the GitNexus ' +
+      'code import pipeline (gbrain code import). New MCP tools — code_query, ' +
+      'code_context, code_impact, code_list_repos — provide code intelligence ' +
+      'alongside existing GBrain operations.',
   },
+  orchestrator,
 };
