@@ -370,31 +370,78 @@ mindmap
 
 ```mermaid
 flowchart LR
-    A1["📝 Markdown 文件"] --> B1["gbrain import"]
-    A2["📦 Git 仓库"] --> B2["gbrain sync"]
-    A3["📎 文件上传"] --> B3["files upload"]
-    A4["🔌 API / Webhook"] --> B4["自定义摄入"]
+    A1["📝 Markdown 目录"] --> B1["gbrain import\n批量导入"]
+    A2["📦 Git 仓库"] --> B2["gbrain sync\n增量同步"]
+    A3["📎 文件上传"] --> B3["files upload\nS3 / Supabase"]
+    A4["🔌 API / Webhook"] --> B4["put_page\n单页写入"]
 
-    B1 --> C1["文件解析"]
-    B2 --> C2["Git Diff 增量"]
-    B3 --> C3["S3 / Supabase Storage"]
-    B4 --> C4["put_page API"]
+    B1 --> C1["文件遍历 + 解析"]
+    B2 --> C2["Git Diff\n检测变更文件"]
+    B3 --> C3["文件存储\n+ 重定向规则"]
+    B4 --> C4["直接写入"]
 
     C1 --> D["分块器 Chunkers"]
     C2 --> D
     C3 --> D
     C4 --> D
 
-    D --> E1["语义分块"]
-    D --> E2["递归分块"]
-    D --> E3["LLM 分块"]
-    D --> E4["代码分块"]
+    D --> E1["语义分块\nMarkdown 文档"]
+    D --> E2["代码分块\nPython/TS/Go..."]
+    D --> E3["递归分块\n长文档"]
+    D --> E4["LLM 分块\n非结构化文本"]
 
-    E1 --> F["Postgres 存储"]
+    E1 --> F[("Postgres\nPages + Chunks")]
     E2 --> F
     E3 --> F
     E4 --> F
 ```
+
+### gbrain sync 管线详解
+
+`gbrain sync` 是 Git → Brain 的**增量同步**管线，追踪 Git commit 只处理变更文件。支持 Markdown 文档和代码文件双通道处理。
+
+```mermaid
+flowchart TB
+    START["gbrain sync --repo /path --include-code"] --> GIT["Git Diff\n检测变更 (新增/修改/删除)"]
+
+    GIT --> CHANGED{"文件类型?"}
+
+    CHANGED -- ".md 文档" --> MD["Markdown 通道"]
+    CHANGED -- ".py/.ts/.go 代码" --> CODE["代码通道\n(需要 --include-code)"]
+
+    subgraph MD["Markdown 文档处理"]
+        M1["解析 frontmatter\n(title, tags, type)"] --> M2["内容分块\n(语义/递归分块器)"]
+        M2 --> M3["生成 Embedding\n(OpenAI API)"]
+        M3 --> M4["创建 Concept Page"]
+    end
+
+    subgraph CODE["代码文件处理"]
+        C1["语言检测\n+ 语法解析"] --> C2["符号提取\n(函数/类/import)"]
+        C2 --> C3["代码分块\n(Code Chunker)"]
+        C3 --> C4["符号 → chunk metadata"]
+        C4 --> C5["imports → graph links"]
+        C5 --> C6["创建 Code File Page"]
+    end
+
+    M4 --> STORE[("Postgres\n+ pgvector")]
+    C6 --> STORE
+
+    GIT -- "删除" --> DEL["标记页面为已删除\n+ 级联清理 chunks/links"]
+
+    STORE --> EXTRACT["gbrain extract links\n批量链接提取(幂等)"]
+    EXTRACT --> DONE["✅ 同步完成\n更新 Git bookmark"]
+```
+
+### 代码导入 vs 文档导入
+
+| 维度 | Markdown 文档 | 代码文件 |
+|------|-------------|---------|
+| 页面类型 | concept | code_file |
+| 分块器 | semantic / recursive | code (语言感知) |
+| 元数据 | frontmatter (title, tags) | file_path, language, symbols |
+| 链接提取 | wikilinks + 实体引用 | imports + calls |
+| 搜索 | 全文 + 语义 | 关键词 + 符号名 (驼峰/蛇形感知) |
+| 图遍历 | 实体关系 (works_at, founded) | 代码关系 (imports, calls) |
 
 ### 处理管线
 
