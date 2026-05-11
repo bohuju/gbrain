@@ -12,6 +12,8 @@ function printUsage(): void {
   console.log(`Usage:
   gbrain code list [--tag <language>] [-n <limit>] [--json]
   gbrain code search <query> [-n <limit>] [--json]
+  gbrain code import <path> [--force] [--no-embed] [--reindex]
+  gbrain code import-list
 `);
 }
 
@@ -126,6 +128,12 @@ export async function runCode(engine: BrainEngine, args: string[]): Promise<void
 
   if (subcommand === 'search') {
     await runSearch(engine, args.slice(1));
+    return;
+  }
+
+  if (subcommand === 'import' || subcommand === 'import-list' || subcommand === 'imports') {
+    const { runCodeCommand } = await import('./code-import.ts');
+    await runCodeCommand(engine, args);
     return;
   }
 
