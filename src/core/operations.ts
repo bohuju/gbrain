@@ -1279,6 +1279,276 @@ const send_job_message: Operation = {
   },
 };
 
+// === Code (GitNexus integration) ===
+
+const CODE_IMPACT_DEPTH_CAP = 5;
+
+const code_list_repos: Operation = {
+  name: 'code_list_repos',
+  description: 'List code repositories imported via GitNexus, with node/edge stats and last commit.',
+  params: {},
+  handler: async (ctx) => {
+    return ctx.engine.executeRaw(
+      `SELECT id, repo_path, repo_commit, nodes_total, edges_total, chunks_total, embedded, status, started_at, finished_at
+       FROM code_imports WHERE status = 'done' ORDER BY started_at DESC`
+    );
+  },
+  cliHints: { name: 'code-repos', hidden: true },
+};
+
+const code_query: Operation = {
+  name: 'code_query',
+  description: 'Search code symbols using hybrid search (vector + keyword). Returns ranked symbols with file locations.',
+  params: {
+    query: { type: 'string', required: true, description: 'Search query for code symbols' },
+    repo: { type: 'string', description: 'Filter by repo name (default: all repos)' },
+    kind: { type: 'string', description: 'Filter by symbol kind: Class, Function, Method, Interface' },
+    limit: { type: 'number', description: 'Max results (default 20)' },
+  },
+  handler: async (ctx, p) => {
+    const limit = clampSearchLimit(p.limit as number | undefined, 20);
+    const query = p.query as string;
+    const repo = p.repo as string | undefined;
+    const kind = p.kind as string | undefined;
+
+    // Build SQL with optional filters
+    let sql = `
+      SELECT p.slug, p.title, p.type, p.frontmatter->>'file' as file,
+             p.frontmatter->>'line' as line, p.frontmatter->>'kind' as kind,
+             COALESCE(ts_rank(p.code_search_vector, websearch_to_tsquery('simple', $1)), 0) AS text_score
+      FROM pages p
+      WHERE p.source_id = 'code'
+        AND p.type LIKE 'code_%'
+        AND (p.code_search_vector @@ websearch_to_tsquery('simple', $1)
+             OR p.title ILIKE '%' || $1 || '%')
+    `;
+
+    const params: unknown[] = [query];
+    let paramIdx = 2;
+
+    if (repo) {
+      sql += ` AND p.frontmatter->>'repo' = $${paramIdx++}`;
+      params.push(repo);
+    }
+    if (kind) {
+      sql += ` AND p.frontmatter->>'kind' = $${paramIdx++}`;
+      params.push(kind);
+    }
+
+    sql += ` ORDER BY text_score DESC LIMIT $${paramIdx}`;
+    params.push(limit);
+
+    const rows = await ctx.engine.executeRaw<{
+      slug: string; title: string; type: string; file: string; line: string;
+      kind: string; text_score: number;
+    }>(sql, params);
+
+    return rows.map(r => ({
+      slug: r.slug,
+      symbol: r.title,
+      kind: r.kind || r.type.replace('code_', ''),
+      file: r.file,
+      line: parseInt(r.line) || 0,
+      score: parseFloat(r.text_score?.toString() || '0'),
+    }));
+  },
+  cliHints: { name: 'code-query', hidden: true },
+};
+
+const code_context: Operation = {
+  name: 'code_context',
+  description: 'Get 360° context on a code symbol: callers, callees, importers, imports. Uses link traversal.',
+  params: {
+    symbol: { type: 'string', required: true, description: 'Code symbol slug or name (supports fuzzy matching)' },
+    repo: { type: 'string', description: 'Repo name (optional, narrows slug search)' },
+  },
+  handler: async (ctx, p) => {
+    const symbol = p.symbol as string;
+    const repo = p.repo as string | undefined;
+
+    // Resolve slug: try exact match → fuzzy → search
+    let slug: string | null = null;
+    let page: Record<string, unknown> | null = null;
+
+    // Try exact slug
+    const exactPage = await ctx.engine.getPage(symbol);
+    if (exactPage && (exactPage.type as string)?.startsWith('code_')) {
+      slug = exactPage.slug;
+      page = exactPage as unknown as Record<string, unknown>;
+    }
+
+    // Try fuzzy prefix
+    if (!slug) {
+      const candidates = await ctx.engine.resolveSlugs(symbol);
+      const codeCandidates = candidates.filter(c => c.startsWith('code/'));
+      if (codeCandidates.length === 1) {
+        slug = codeCandidates[0];
+        page = await ctx.engine.getPage(slug) as unknown as Record<string, unknown> || null;
+      }
+    }
+
+    // Try name search in frontmatter
+    if (!slug) {
+      let sql = `SELECT slug FROM pages WHERE source_id = 'code' AND title = $1`;
+      const params: unknown[] = [symbol];
+      if (repo) { sql += ` AND frontmatter->>'repo' = $2`; params.push(repo); }
+      sql += ` LIMIT 1`;
+      const rows = await ctx.engine.executeRaw<{ slug: string }>(sql, params);
+      if (rows.length > 0) {
+        slug = rows[0].slug;
+        page = await ctx.engine.getPage(slug) as unknown as Record<string, unknown> || null;
+      }
+    }
+
+    if (!slug || !page) {
+      throw new OperationError('page_not_found', `Code symbol not found: ${symbol}`, 'Try code_query to find the symbol first');
+    }
+
+    // Collect relations via links
+    const callers = await ctx.engine.executeRaw<{ slug: string; title: string; type: string; frontmatter: Record<string, unknown> }>(
+      `SELECT p.slug, p.title, p.type, p.frontmatter
+       FROM links l JOIN pages p ON p.id = l.from_page_id
+       WHERE l.to_page_id = (SELECT id FROM pages WHERE slug = $1)
+         AND l.link_type IN ('code_call', 'code_import')
+         AND p.source_id = 'code' LIMIT 100`,
+      [slug],
+    );
+
+    const callees = await ctx.engine.executeRaw<{ slug: string; title: string; type: string; frontmatter: Record<string, unknown> }>(
+      `SELECT p.slug, p.title, p.type, p.frontmatter
+       FROM links l JOIN pages p ON p.id = l.to_page_id
+       WHERE l.from_page_id = (SELECT id FROM pages WHERE slug = $1)
+         AND l.link_type = 'code_call'
+         AND p.source_id = 'code' LIMIT 100`,
+      [slug],
+    );
+
+    const fm = (page.frontmatter || {}) as Record<string, unknown>;
+
+    return {
+      symbol: {
+        slug,
+        name: page.title,
+        kind: fm.kind || page.type,
+        file: fm.file || '',
+        line: fm.line || 0,
+        signature: fm.signature,
+      },
+      callers: callers.map(r => ({ slug: r.slug, name: r.title, kind: (r.frontmatter?.kind as string) || r.type, file: (r.frontmatter?.file as string) || '' })),
+      callees: callees.map(r => ({ slug: r.slug, name: r.title, kind: (r.frontmatter?.kind as string) || r.type, file: (r.frontmatter?.file as string) || '' })),
+      importers: [],
+      imports: [],
+    };
+  },
+  cliHints: { name: 'code-context', hidden: true },
+};
+
+const code_impact: Operation = {
+  name: 'code_impact',
+  description: 'Analyze blast radius of changing a code symbol. Returns upstream/downstream dependents with risk levels.',
+  params: {
+    symbol: { type: 'string', required: true, description: 'Code symbol slug or name' },
+    repo: { type: 'string', description: 'Repo name (optional)' },
+    direction: { type: 'string', enum: ['upstream', 'downstream', 'both'], description: 'Impact direction (default: upstream)' },
+    depth: { type: 'number', description: `Max traversal depth (default 3, capped at ${CODE_IMPACT_DEPTH_CAP})` },
+  },
+  handler: async (ctx, p) => {
+    const symbol = p.symbol as string;
+    const direction = (p.direction as string) || 'upstream';
+    const requestedDepth = (p.depth as number) || 3;
+    const depth = Math.max(1, Math.min(requestedDepth, CODE_IMPACT_DEPTH_CAP));
+
+    // Resolve slug (same as code_context)
+    let slug: string | null = null;
+    const exactPage = await ctx.engine.getPage(symbol);
+    if (exactPage && (exactPage.type as string)?.startsWith('code_')) {
+      slug = exactPage.slug;
+    }
+    if (!slug) {
+      const candidates = await ctx.engine.resolveSlugs(symbol);
+      const codeCandidates = candidates.filter(c => c.startsWith('code/'));
+      if (codeCandidates.length === 1) slug = codeCandidates[0];
+    }
+    if (!slug) {
+      throw new OperationError('page_not_found', `Code symbol not found: ${symbol}`);
+    }
+
+    const page = await ctx.engine.getPage(slug);
+    if (!page) throw new OperationError('page_not_found', `Symbol page not found: ${slug}`);
+
+    // Use recursive CTE for graph traversal
+    // direction=upstream: follow links WHERE to_page_id = our page (who calls us)
+    // direction=downstream: follow links WHERE from_page_id = our page (who we call)
+    const linkCondition = direction === 'downstream'
+      ? `l.from_page_id = node.page_id`
+      : direction === 'both'
+        ? `(l.to_page_id = node.page_id OR l.from_page_id = node.page_id)`
+        : `l.to_page_id = node.page_id`;  // upstream default
+
+    const sql = `
+      WITH RECURSIVE impact AS (
+        -- Base: the target symbol
+        SELECT p.id AS page_id, p.slug, p.title, p.type, p.frontmatter,
+               0 AS depth, '' AS via
+        FROM pages p WHERE p.slug = $1
+
+        UNION
+
+        -- Recursive step
+        SELECT p.id, p.slug, p.title, p.type, p.frontmatter,
+               impact.depth + 1, l.link_type
+        FROM impact
+        JOIN links l ON (${linkCondition})
+        JOIN pages p ON p.id = CASE
+          WHEN '${direction}' = 'downstream' THEN l.to_page_id
+          ELSE l.from_page_id
+        END
+        WHERE impact.depth < $2
+          AND p.source_id = 'code'
+          AND l.link_type IN ('code_call', 'code_extends', 'code_implements', 'code_import')
+      )
+      SELECT DISTINCT ON (slug) slug, title, type, frontmatter, depth, via
+      FROM impact WHERE depth > 0
+      ORDER BY slug, depth
+      LIMIT 500
+    `;
+
+    const rows = await ctx.engine.executeRaw<{
+      slug: string; title: string; type: string;
+      frontmatter: Record<string, unknown>; depth: number; via: string;
+    }>(sql, [slug, depth]);
+
+    const impact = rows.map(r => ({
+      slug: r.slug,
+      name: r.title,
+      kind: (r.frontmatter?.kind as string) || r.type,
+      file: (r.frontmatter?.file as string) || '',
+      depth: parseInt(String(r.depth)),
+      risk: (parseInt(String(r.depth)) === 1 ? 'HIGH' : parseInt(String(r.depth)) === 2 ? 'MEDIUM' : 'LOW') as 'HIGH' | 'MEDIUM' | 'LOW',
+      via: r.via,
+    }));
+
+    const fm = (page.frontmatter || {}) as Record<string, unknown>;
+
+    return {
+      target: {
+        slug,
+        name: page.title,
+        kind: (fm.kind as string) || page.type,
+        file: (fm.file as string) || '',
+      },
+      impact,
+      riskSummary: {
+        total: impact.length,
+        high: impact.filter(i => i.risk === 'HIGH').length,
+        medium: impact.filter(i => i.risk === 'MEDIUM').length,
+        low: impact.filter(i => i.risk === 'LOW').length,
+      },
+    };
+  },
+  cliHints: { name: 'code-impact', hidden: true },
+};
+
 // --- Orphans ---
 
 const find_orphans: Operation = {
@@ -1327,6 +1597,8 @@ export const operations: Operation[] = [
   pause_job, resume_job, replay_job, send_job_message,
   // Orphans
   find_orphans,
+  // Code (GitNexus integration)
+  code_list_repos, code_query, code_context, code_impact,
 ];
 
 export const operationsByName = Object.fromEntries(
