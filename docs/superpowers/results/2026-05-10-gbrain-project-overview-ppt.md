@@ -35,24 +35,21 @@ AI agent 执行任务时缺乏**持久化知识**和**上下文记忆**。每次
 
 ### GBrain 的答案
 
-```
-┌─────────────────────────────────────────────┐
-│               AI Agent                       │
-│  Claude Code / OpenCode / Cursor / ...      │
-└──────────────┬──────────────────────────────┘
-               │ MCP (stdio) / CLI
-┌──────────────▼──────────────────────────────┐
-│               GBrain                         │
-│  ┌─────────┐ ┌──────────┐ ┌──────────────┐ │
-│  │ Search  │ │ Graph    │ │ Timeline     │ │
-│  │ Hybrid  │ │ Self-    │ │ Compiled     │ │
-│  │ RAG     │ │ Wiring   │ │ Truth        │ │
-│  └─────────┘ └──────────┘ └──────────────┘ │
-│  ┌────────────────────────────────────────┐ │
-│  │         Postgres + pgvector            │ │
-│  │    (PGLite WASM / Supabase / 自托管)    │ │
-│  └────────────────────────────────────────┘ │
-└─────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    AG["🤖 AI Agent<br/>Claude Code / OpenCode / Cursor"]
+    GB["🧠 GBrain"]
+    subgraph GBrain
+        SE["Search<br/>Hybrid RAG"]
+        GR["Graph<br/>Self-Wiring"]
+        TL["Timeline<br/>Compiled Truth"]
+    end
+    DB[("Postgres + pgvector<br/>PGLite WASM / Supabase / 自托管")]
+
+    AG -- "MCP (stdio)" --> GB
+    SE --> DB
+    GR --> DB
+    TL --> DB
 ```
 
 ### 三大差异化能力
@@ -67,18 +64,34 @@ AI agent 执行任务时缺乏**持久化知识**和**上下文记忆**。每次
 
 ### 四层架构
 
-```
-Agent 交互层
-  CLI (55 commands)  ←→  MCP Server (36 tools, stdio)
+```mermaid
+flowchart TB
+    subgraph L1["Agent 交互层"]
+        CLI["CLI (55 commands)"]
+        MCP["MCP Server (36 tools, stdio)"]
+    end
 
-核心操作层 (Contract-First)
-  operations.ts — 36 个操作定义，CLI 和 MCP 共享
+    subgraph L2["核心操作层 (Contract-First)"]
+        OPS["operations.ts — 36 个操作定义<br/>CLI 和 MCP 共享的单一事实来源"]
+    end
 
-引擎抽象层 (BrainEngine Interface)
-  PGLiteEngine (WASM, 零配置)  ←→  PostgresEngine (Supabase/自托管)
+    subgraph L3["引擎抽象层 (BrainEngine Interface)"]
+        PGL["PGLiteEngine<br/>WASM, 零配置"]
+        PG["PostgresEngine<br/>Supabase / 自托管"]
+    end
 
-存储层
-  Git (markdown 源)  ←→  Database (Postgres + pgvector + tsvector + pg_trgm)
+    subgraph L4["存储层"]
+        GIT["Git (markdown 源)"]
+        DB[("Database<br/>Postgres + pgvector<br/>+ tsvector + pg_trgm")]
+    end
+
+    CLI --> OPS
+    MCP --> OPS
+    OPS --> PGL
+    OPS --> PG
+    PGL --> DB
+    PG --> DB
+    GIT <--> DB
 ```
 
 ### 代码规模
@@ -255,29 +268,34 @@ pg_trgm 模糊匹配 → slug registry 解析
 
 ### MCP Server (stdio)
 
-```
-┌───────────────────────────────────────┐
-│         AI Agent Platform              │
-│  Claude Code / Claude Desktop /        │
-│  OpenCode / Perplexity / Cursor /     │
-│  AlphaClaw / Claude Cowork / ...      │
-└──────────┬────────────────────────────┘
-           │ stdio (JSON-RPC)
-┌──────────▼────────────────────────────┐
-│         GBrain MCP Server              │
-│                                        │
-│  36 个 MCP 工具:                        │
-│  ┌──────────┐ ┌──────────┐ ┌───────┐  │
-│  │ 搜索/查询│ │ 页面 CRUD│ │ 图操作 │  │
-│  │ search   │ │ get_page │ │ graph │  │
-│  │ query    │ │ put_page │ │ links │  │
-│  └──────────┘ └──────────┘ └───────┘  │
-│  ┌──────────┐ ┌──────────┐ ┌───────┐  │
-│  │ 文件管理 │ │ 任务系统 │ │ 管理  │  │
-│  │ upload   │ │ submit   │ │ stats │  │
-│  │ signed   │ │ get_job  │ │ health│  │
-│  └──────────┘ └──────────┘ └───────┘  │
-└────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Platforms["AI Agent 平台"]
+        CC["Claude Code"]
+        CD["Claude Desktop"]
+        OC["OpenCode"]
+        PP["Perplexity"]
+        CR["Cursor"]
+        AC["AlphaClaw"]
+        CW["Claude Cowork"]
+    end
+
+    MCPS["GBrain MCP Server<br/>36 tools"]
+
+    subgraph ToolGroups["工具分组"]
+        T1["搜索/查询<br/>search / query"]
+        T2["页面 CRUD<br/>get / put / delete / list"]
+        T3["图操作<br/>graph / links / backlinks"]
+        T4["文件管理<br/>upload / signed-url"]
+        T5["任务系统<br/>submit / get_job"]
+        T6["管理<br/>stats / health"]
+    end
+
+    DB[("Postgres<br/>+ pgvector")]
+
+    Platforms -- "stdio (JSON-RPC)" --> MCPS
+    MCPS --> ToolGroups
+    ToolGroups --> DB
 ```
 
 ### 安全边界 (remote=true)
@@ -293,6 +311,297 @@ MCP 调用自动设置 `ctx.remote = true`，触发：
 ### 支持的 Agent 平台
 
 Claude Code, Claude Desktop, Claude Cowork, OpenCode, Perplexity, OpenClaw (AlphaClaw), Cursor, 及任何 stdio MCP 兼容平台。7 个部署指南文档。
+
+---
+
+## 管线可视化
+
+### 项目架构思维导图
+
+```mermaid
+mindmap
+  root((GBrain))
+    CLI
+      55个命令
+      init / upgrade / doctor
+      import / export / sync
+      search / query / ask
+      get / put / delete / list
+      graph / backlinks / link
+      jobs / stats / health
+      dream / autopilot
+    MCP_Server
+      36个工具
+      7个Agent平台
+      安全边界
+      Stdio传输
+    核心引擎
+      BrainEngine接口
+      PGLiteEngine
+      PostgresEngine
+      37个方法
+    混合搜索
+      向量搜索
+      关键词搜索
+      多查询扩展
+      RRF融合
+      4层去重
+    知识图谱
+      零LLM提取
+      有类型链接
+      图遍历
+      链接对账
+    页面架构
+      编译真理层
+      时间线层
+      版本历史
+    后台任务
+      Minions队列
+      Worker守护
+      8个Handler
+      并发安全
+    部署模式
+      PGLite本地
+      Postgres自托管
+      Supabase云端
+```
+
+### 数据摄入管线
+
+```mermaid
+flowchart LR
+    A1["📝 Markdown 文件"] --> B1["gbrain import"]
+    A2["📦 Git 仓库"] --> B2["gbrain sync"]
+    A3["📎 文件上传"] --> B3["files upload"]
+    A4["🔌 API / Webhook"] --> B4["自定义摄入"]
+
+    B1 --> C1["文件解析"]
+    B2 --> C2["Git Diff 增量"]
+    B3 --> C3["S3 / Supabase Storage"]
+    B4 --> C4["put_page API"]
+
+    C1 --> D["分块器 Chunkers"]
+    C2 --> D
+    C3 --> D
+    C4 --> D
+
+    D --> E1["语义分块"]
+    D --> E2["递归分块"]
+    D --> E3["LLM 分块"]
+    D --> E4["代码分块"]
+
+    E1 --> F["Postgres 存储"]
+    E2 --> F
+    E3 --> F
+    E4 --> F
+```
+
+### 处理管线
+
+```mermaid
+flowchart TB
+    subgraph 写入触发
+        A["put_page(slug, content)"]
+    end
+
+    subgraph 分块与嵌入
+        B1["内容分块"] --> B2["生成 Embedding"]
+        B2 --> B3["存储到 pgvector"]
+    end
+
+    subgraph 知识图谱
+        C1["正则提取实体引用"] --> C2["pg_trgm 模糊匹配"]
+        C2 --> C3["创建有类型链接"]
+        C3 --> C4["链接对账 (移除过期)"]
+    end
+
+    subgraph 时间线
+        D1["正则提取日期/摘要"] --> D2["追加到 Timeline"]
+    end
+
+    subgraph 充实度
+        E1["实体类型识别"] --> E2["加权评分"]
+        E2 --> E3["充实度报告"]
+    end
+
+    A --> B1
+    A --> C1
+    A --> D1
+    B3 --> E1
+    C4 --> E1
+    D2 --> E1
+```
+
+### 查询管线
+
+```mermaid
+flowchart LR
+    Q["🔍 用户查询"] --> S1["向量搜索\npgvector HNSW"]
+    Q --> S2["关键词搜索\ntsvector + ts_rank"]
+    Q --> S3["多查询扩展\n替代表述生成"]
+
+    S1 --> F["RRF 融合\nReciprocal Rank Fusion"]
+    S2 --> F
+    S3 --> F
+
+    F --> D1["去重层 1\ncompiled_truth 优先"]
+    D1 --> D2["去重层 2\ntimeline 优先"]
+    D2 --> D3["去重层 3\n来源优先级"]
+    D3 --> D4["去重层 4\ncosine 去重"]
+
+    D4 --> B["反向链接加权\n入链越多排名越高"]
+    B --> R["返回排序结果"]
+```
+
+### 夜间维护管线 (dream / autopilot)
+
+```mermaid
+flowchart TB
+    START["🌙 触发"] --> P1["1. Git Pull\n同步脑仓库"]
+    P1 --> P2["2. Sync\nMarkdown → DB"]
+    P2 --> P3["3. Lint\n检查 LLM 痕迹、占位日期、错误 frontmatter"]
+    P3 --> P4["4. Extract Links\n链接对账"]
+    P4 --> P5["5. Check Backlinks\n修复缺失反向链接"]
+    P5 --> P6["6. Embed Stale\n嵌入过期页面"]
+    P6 --> P7["7. Find Orphans\n发现孤立页面"]
+    P7 --> P8["8. Health Report\n生成健康报告"]
+    P8 --> END["✅ 完成"]
+
+    style START fill:#2d5016,color:#fff
+    style END fill:#2d5016,color:#fff
+    style P3 fill:#8b4513,color:#fff
+    style P5 fill:#8b4513,color:#fff
+```
+
+### 端到端系统全景图
+
+```mermaid
+flowchart TB
+    subgraph 数据源
+        S1["📝 Markdown"]
+        S2["📦 Git Repos"]
+        S3["📎 Files"]
+        S4["🔌 API"]
+    end
+
+    subgraph 摄入层
+        I1["import"]
+        I2["sync"]
+        I3["files upload"]
+        I4["put_page"]
+    end
+
+    subgraph 处理层
+        P1["Chunkers\n分块"]
+        P2["Embedding\n嵌入"]
+        P3["Link Extract\n链接提取"]
+        P4["Timeline\n时间线"]
+        P5["Lint\n质量检查"]
+        P6["Enrichment\n充实度"]
+    end
+
+    subgraph 存储层
+        ST1[("Postgres\n+ pgvector")]
+        ST2[("Git\nMarkdown 源")]
+    end
+
+    subgraph 查询层
+        Q1["search\n关键词"]
+        Q2["query\n混合RAG"]
+        Q3["graph\n图遍历"]
+        Q4["get_page\n页面读取"]
+        Q5["backlinks\n反向链接"]
+        Q6["code search\n代码搜索"]
+    end
+
+    subgraph 维护层
+        M1["dream\n夜间周期"]
+        M2["autopilot\n持续守护"]
+        M3["doctor\n健康诊断"]
+    end
+
+    subgraph Agent
+        AG["🤖 AI Agent\nClaude / OpenCode / Cursor"]
+    end
+
+    S1 --> I1
+    S2 --> I2
+    S3 --> I3
+    S4 --> I4
+
+    I1 --> P1
+    I2 --> P1
+    I3 --> P1
+    I4 --> P1
+
+    P1 --> P2
+    P1 --> P3
+    P1 --> P4
+    P2 --> P6
+    P3 --> P6
+    P4 --> P6
+    P5 --> P6
+
+    P1 --> ST1
+    P2 --> ST1
+    P3 --> ST1
+    P4 --> ST1
+    ST1 <--> ST2
+
+    ST1 --> Q1
+    ST1 --> Q2
+    ST1 --> Q3
+    ST1 --> Q4
+    ST1 --> Q5
+    ST1 --> Q6
+
+    M1 --> ST1
+    M2 --> ST1
+    M3 --> ST1
+
+    Q1 --> AG
+    Q2 --> AG
+    Q3 --> AG
+    Q4 --> AG
+    Q5 --> AG
+    Q6 --> AG
+    AG --> I4
+```
+
+### Minions 任务队列并发模型
+
+```mermaid
+sequenceDiagram
+    participant C as Client (CLI/MCP)
+    participant Q as Queue (Postgres)
+    participant W1 as Worker 1
+    participant W2 as Worker 2
+    participant H as Handler
+
+    C->>Q: submit_job(name, params)
+    Q-->>C: job_id
+
+    W1->>Q: FOR UPDATE SKIP LOCKED
+    Q-->>W1: claim job_1
+    W2->>Q: FOR UPDATE SKIP LOCKED
+    Q-->>W2: claim job_2
+
+    W1->>H: dispatch(job_1)
+    W2->>H: dispatch(job_2)
+
+    H-->>W1: progress update
+    W1->>Q: UPDATE progress
+    H-->>W2: progress update
+    W2->>Q: UPDATE progress
+
+    H-->>W1: complete
+    W1->>Q: UPDATE status=done
+    H-->>W2: complete
+    W2->>Q: UPDATE status=done
+
+    C->>Q: get_job(job_id)
+    Q-->>C: status + result
+```
 
 ---
 
@@ -416,23 +725,30 @@ gbrain migrate --to pglite      # Postgres → PGLite (降级/备份)
 
 ### 代码组织
 
-```
-src/
-├── cli.ts                  # CLI 入口 (638 LOC)
-├── core/                   # 核心库 (37 文件, 引擎无关)
-│   ├── engine.ts           #   引擎接口 (37 methods)
-│   ├── operations.ts       #   契约定义 (1,334 LOC)
-│   ├── postgres-engine.ts  #   Postgres 实现 (1,128 LOC)
-│   ├── pglite-engine.ts    #   PGLite 实现 (1,066 LOC)
-│   ├── search/             #   混合搜索子系统
-│   ├── chunkers/           #   内容分块策略
-│   ├── code/               #   代码导入/分析
-│   ├── minions/            #   后台任务队列
-│   ├── enrichment/         #   充实度评分
-│   ├── repo-analyzer/      #   Git 仓库分析
-│   └── resolvers/          #   Slug 解析
-├── commands/               # CLI 命令 (35 文件)
-└── mcp/                    # MCP 服务器
+```mermaid
+flowchart LR
+    subgraph src["src/"]
+        CLI["cli.ts<br/>638 LOC"]
+        CORE["core/<br/>37 files"]
+        CMD["commands/<br/>35 files"]
+        MCP["mcp/<br/>server + tools"]
+    end
+
+    subgraph core["core/ 核心模块"]
+        ENG["engine.ts<br/>37 methods"]
+        OPS["operations.ts<br/>1,334 LOC"]
+        SEARCH["search/<br/>hybrid + vector + keyword"]
+        GRAPH["link-extraction.ts<br/>816 LOC"]
+        MINIONS["minions/<br/>job queue + worker"]
+        CHUNK["chunkers/<br/>semantic + code"]
+        CYCLE["cycle.ts<br/>817 LOC"]
+        CODE["code/<br/>code import + search"]
+    end
+
+    src --> core
+    CLI --> CMD
+    MCP --> OPS
+    CLI --> OPS
 ```
 
 ### 工程质量
