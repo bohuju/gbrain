@@ -366,82 +366,221 @@ mindmap
       Supabase云端
 ```
 
-### 数据摄入管线
+### 文件类型路由总览
 
-```mermaid
-flowchart LR
-    A1["📝 Markdown 目录"] --> B1["gbrain import\n批量导入"]
-    A2["📦 Git 仓库"] --> B2["gbrain sync\n增量同步"]
-    A3["📎 文件上传"] --> B3["files upload\nS3 / Supabase"]
-    A4["🔌 API / Webhook"] --> B4["put_page\n单页写入"]
-
-    B1 --> C1["文件遍历 + 解析"]
-    B2 --> C2["Git Diff\n检测变更文件"]
-    B3 --> C3["文件存储\n+ 重定向规则"]
-    B4 --> C4["直接写入"]
-
-    C1 --> D["分块器 Chunkers"]
-    C2 --> D
-    C3 --> D
-    C4 --> D
-
-    D --> E1["语义分块\nMarkdown 文档"]
-    D --> E2["代码分块\nPython/TS/Go..."]
-    D --> E3["递归分块\n长文档"]
-    D --> E4["LLM 分块\n非结构化文本"]
-
-    E1 --> F[("Postgres\nPages + Chunks")]
-    E2 --> F
-    E3 --> F
-    E4 --> F
-```
-
-### gbrain sync 管线详解
-
-`gbrain sync` 是 Git → Brain 的**增量同步**管线，追踪 Git commit 只处理变更文件。支持 Markdown 文档和代码文件双通道处理。
+GBrain 根据文件扩展名和 MIME 类型，将不同文件路由到不同的处理通道：
 
 ```mermaid
 flowchart TB
-    START["gbrain sync --repo /path --include-code"] --> GIT["Git Diff\n检测变更 (新增/修改/删除)"]
+    INPUT["📥 输入源\nimport / sync / files upload / put_page"]
 
-    GIT --> CHANGED{"文件类型?"}
+    INPUT --> DETECT{"文件类型检测\n(扩展名 + MIME)"}
 
-    CHANGED -- ".md 文档" --> MD["Markdown 通道"]
-    CHANGED -- ".py/.ts/.go 代码" --> CODE["代码通道\n(需要 --include-code)"]
+    DETECT -- ".md" --> MD["📝 Markdown 通道"]
+    DETECT -- ".py .ts .go .js .rs ..." --> CODE["💻 代码通道"]
+    DETECT -- ".json .csv .yaml" --> DATA["📊 数据通道"]
+    DETECT -- ".pdf .docx .html" --> DOC["📄 文档通道"]
+    DETECT -- ".png .jpg .mp4 .mov ..." --> MEDIA["🖼️ 媒体通道"]
 
-    subgraph MD["Markdown 文档处理"]
-        M1["解析 frontmatter\n(title, tags, type)"] --> M2["内容分块\n(语义/递归分块器)"]
-        M2 --> M3["生成 Embedding\n(OpenAI API)"]
-        M3 --> M4["创建 Concept Page"]
-    end
-
-    subgraph CODE["代码文件处理"]
-        C1["语言检测\n+ 语法解析"] --> C2["符号提取\n(函数/类/import)"]
-        C2 --> C3["代码分块\n(Code Chunker)"]
-        C3 --> C4["符号 → chunk metadata"]
-        C4 --> C5["imports → graph links"]
-        C5 --> C6["创建 Code File Page"]
-    end
-
-    M4 --> STORE[("Postgres\n+ pgvector")]
-    C6 --> STORE
-
-    GIT -- "删除" --> DEL["标记页面为已删除\n+ 级联清理 chunks/links"]
-
-    STORE --> EXTRACT["gbrain extract links\n批量链接提取(幂等)"]
-    EXTRACT --> DONE["✅ 同步完成\n更新 Git bookmark"]
+    MD --> MD_PIPE["Markdown 处理管线"]
+    CODE --> CODE_PIPE["代码处理管线"]
+    DATA --> DATA_PIPE["数据处理管线"]
+    DOC --> DOC_PIPE["文档处理管线"]
+    MEDIA --> MEDIA_PIPE["媒体处理管线"]
 ```
 
-### 代码导入 vs 文档导入
+### Markdown 处理管线 (.md)
 
-| 维度 | Markdown 文档 | 代码文件 |
-|------|-------------|---------|
-| 页面类型 | concept | code_file |
-| 分块器 | semantic / recursive | code (语言感知) |
-| 元数据 | frontmatter (title, tags) | file_path, language, symbols |
-| 链接提取 | wikilinks + 实体引用 | imports + calls |
-| 搜索 | 全文 + 语义 | 关键词 + 符号名 (驼峰/蛇形感知) |
-| 图遍历 | 实体关系 (works_at, founded) | 代码关系 (imports, calls) |
+```mermaid
+flowchart TB
+    MD_IN["📝 .md 文件"] --> FM["解析 Frontmatter\n(title, type, tags, date)"]
+
+    FM --> TYPE{"page type?"}
+
+    TYPE -- "person" --> PERSON["👤 人物页面\n充实度: 人物评分标准"]
+    TYPE -- "company" --> COMPANY["🏢 公司页面\n充实度: 公司评分标准"]
+    TYPE -- "meeting" --> MEETING["📅 会议页面\n自动时间线提取"]
+    TYPE -- "project" --> PROJECT["📋 项目页面"]
+    TYPE -- "concept (默认)" --> CONCEPT["📖 概念页面"]
+
+    PERSON --> CHUNK
+    COMPANY --> CHUNK
+    MEETING --> CHUNK
+    PROJECT --> CHUNK
+    CONCEPT --> CHUNK
+
+    subgraph CHUNK["分块阶段"]
+        C1["语义分块器\n按标题/段落边界"] --> C2["生成 Chunk"]
+        C2 --> C3["Chunk Metadata\n(位置、标题层级)"]
+    end
+
+    CHUNK --> EMBED["生成 Embedding\nOpenAI API"]
+    EMBED --> EXTRACT_LINKS["实体引用提取\n(零 LLM 调用)"]
+
+    subgraph LINKS["链接提取详情"]
+        L1["正则匹配:\n[[wikilink]] / [text](slug)"] --> L2["pg_trgm 模糊匹配\n→ 解析为已有 slug"]
+        L2 --> L3["创建有类型链接:\nattended / works_at / founded / references"]
+    end
+
+    EXTRACT_LINKS --> TL["时间线提取\n正则匹配日期行 → timeline entry"]
+    TL --> STORE_MD[("Postgres\nPages + Chunks + Links\n+ Timeline + Embeddings")]
+
+    STORE_MD --> ENRICH["充实度评分\ncompleteness.ts"]
+    ENRICH --> LINT["质量检查\nlint (LLM痕迹/占位日期/错误frontmatter)"]
+```
+
+### 代码处理管线 (.py .ts .go .js ...)
+
+```mermaid
+flowchart TB
+    CODE_IN["💻 代码文件\n.py .ts .go .js .rs .java ..."] --> LANG["语言检测\n基于扩展名"]
+
+    LANG --> PARSE["语法解析\nTree-sitter / regex"]
+
+    subgraph SYMBOLS["符号提取"]
+        S1["函数定义\nfunction / def / fn"] --> SMETA["symbol → chunk metadata"]
+        S2["类定义\nclass / interface / struct"] --> SMETA
+        S3["导入语句\nimport / from / require"] --> IMETA["import → graph link"]
+        S4["导出语句\nexport / pub"] --> SMETA
+    end
+
+    PARSE --> SYMBOLS
+
+    SYMBOLS --> CCHUNK["代码分块器\nCode Chunker\n(函数/类边界)"]
+
+    CCHUNK --> CEMBED["生成 Embedding\n(可选, 需要 API Key)"]
+
+    CEMBED --> CSTORE[("Postgres\ncode_file page\n+ 符号元数据 chunk\n+ import/call graph links")]
+
+    CSTORE --> CSEARCH["代码搜索索引\ntsvector (关键词)\n+ 驼峰/蛇形/路径感知"]
+```
+
+### 数据处理管线 (.json .csv .yaml)
+
+```mermaid
+flowchart TB
+    DATA_IN["📊 数据文件\n.json .csv .yaml"] --> DETECT{"数据结构?"}
+
+    DETECT -- "结构化 JSON" --> JSON["JSON 解析\n→ raw_data page"]
+    DETECT -- "CSV 表格" --> CSV["CSV 解析\n→ raw_data page\n(列名 → metadata)"]
+    DETECT -- "YAML 配置" --> YAML["YAML 解析\n→ raw_data page"]
+
+    JSON --> DSTORE[("Postgres\nraw_data 页面\n+ JSONB 字段")]
+    CSV --> DSTORE
+    YAML --> DSTORE
+
+    DSTORE --> DQUERY["通过 slug 引用\n或 API 查询"]
+```
+
+### 文档处理管线 (.pdf .docx .html)
+
+```mermaid
+flowchart TB
+    DOC_IN["📄 文档文件\n.pdf .docx .html"] --> UPLOAD["files upload\n→ S3 / Supabase Storage"]
+
+    UPLOAD --> CONVERT{"格式转换?"}
+
+    CONVERT -- "HTML" --> HTML["HTML → Markdown\n(标签清洗)"]
+    CONVERT -- "PDF (小)" --> PDF_SMALL["PDF → 文本提取\n→ Markdown"]
+    CONVERT -- "PDF (大) / DOCX" --> PDF_LARGE["存储为二进制文件\nfiles upload-raw"]
+
+    HTML --> MD_OUT["转为 .md → Markdown 通道"]
+    PDF_SMALL --> MD_OUT
+    PDF_LARGE --> FILE_STORE[("S3 / Supabase\n文件存储\n通过 files signed-url 访问")]
+
+    FILE_STORE --> REF["页面中通过\nslug 引用文件"]
+```
+
+### 媒体处理管线 (.png .jpg .mp4 ...)
+
+```mermaid
+flowchart TB
+    MEDIA_IN["🖼️ 媒体文件\n.png .jpg .gif .svg .mp4 .mov .mp3"] --> SIZE{"文件大小?"}
+
+    SIZE -- "< 10MB" --> DIRECT["files upload\n直接上传到 S3/Supabase"]
+    SIZE -- "≥ 10MB" --> RAW["files upload-raw\n大文件智能路由"]
+
+    DIRECT --> META["提取元数据\n(尺寸/时长/格式)"]
+    RAW --> META
+
+    META --> MSTORE[("S3 / Supabase\n文件存储")]
+
+    MSTORE --> URL["files signed-url\n生成 1 小时签名 URL"]
+    URL --> PAGE["页面中嵌入引用\n![image](signed-url)"]
+```
+
+### 全文件类型处理对比
+
+```mermaid
+flowchart TB
+    subgraph INPUTS["输入源"]
+        IMP["gbrain import"]
+        SYNC["gbrain sync"]
+        UP["files upload"]
+        PUT["put_page API"]
+    end
+
+    subgraph ROUTER["文件类型路由器"]
+        R{"扩展名 / MIME 检测"}
+    end
+
+    subgraph MD_CH["Markdown 通道"]
+        direction TB
+        M1["Frontmatter 解析"] --> M2["类型路由\n(person/company/meeting/project/concept)"]
+        M2 --> M3["语义/递归分块"]
+        M3 --> M4["Embedding"]
+        M4 --> M5["链接 + 时间线提取"]
+        M5 --> M6["充实度评分"]
+        M6 --> M7["Lint 质量检查"]
+    end
+
+    subgraph CODE_CH["代码通道"]
+        direction TB
+        C1["语言检测"] --> C2["符号提取\n(函数/类/import)"]
+        C2 --> C3["代码分块"]
+        C3 --> C4["Embedding (可选)"]
+        C4 --> C5["imports → graph links"]
+    end
+
+    subgraph DATA_CH["数据通道"]
+        direction TB
+        D1["JSON/CSV/YAML 解析"] --> D2["raw_data page"]
+    end
+
+    subgraph DOC_CH["文档通道"]
+        direction TB
+        DC1["上传到 S3/Supabase"] --> DC2["HTML/PDF → Markdown 转换"]
+        DC2 --> DC3["→ Markdown 通道"]
+    end
+
+    subgraph MEDIA_CH["媒体通道"]
+        direction TB
+        ME1["上传到 S3/Supabase"] --> ME2["元数据提取"]
+        ME2 --> ME3["signed-url 引用"]
+    end
+
+    subgraph STORAGE["存储层"]
+        PG[("Postgres\n+ pgvector")]
+        S3[("S3 / Supabase Storage")]
+    end
+
+    IMP --> R
+    SYNC --> R
+    UP --> R
+    PUT --> R
+
+    R -- ".md" --> MD_CH
+    R -- ".py .ts .go ..." --> CODE_CH
+    R -- ".json .csv .yaml" --> DATA_CH
+    R -- ".pdf .docx .html" --> DOC_CH
+    R -- ".png .jpg .mp4 ..." --> MEDIA_CH
+
+    MD_CH --> PG
+    CODE_CH --> PG
+    DATA_CH --> PG
+    DOC_CH --> PG
+    DOC_CH --> S3
+    MEDIA_CH --> S3
 
 ### 处理管线
 
