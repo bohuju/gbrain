@@ -1480,10 +1480,10 @@ const code_impact: Operation = {
     // direction=upstream: follow links WHERE to_page_id = our page (who calls us)
     // direction=downstream: follow links WHERE from_page_id = our page (who we call)
     const linkCondition = direction === 'downstream'
-      ? `l.from_page_id = node.page_id`
+      ? `l.from_page_id = impact.page_id`
       : direction === 'both'
-        ? `(l.to_page_id = node.page_id OR l.from_page_id = node.page_id)`
-        : `l.to_page_id = node.page_id`;  // upstream default
+        ? `(l.to_page_id = impact.page_id OR l.from_page_id = impact.page_id)`
+        : `l.to_page_id = impact.page_id`;  // upstream default
 
     const sql = `
       WITH RECURSIVE impact AS (

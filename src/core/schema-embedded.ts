@@ -331,7 +331,7 @@ BEGIN
   FROM timeline_entries
   WHERE page_id = NEW.id;
 
-  IF NEW.type = 'code_file' THEN
+  IF NEW.type LIKE 'code_%' THEN
     NEW.search_vector := NULL;
     NEW.code_search_vector :=
       setweight(to_tsvector('simple', coalesce(NEW.title, '')), 'A') ||
@@ -543,6 +543,27 @@ END;
 DROP TRIGGER IF EXISTS minion_job_notify ON minion_jobs;
 CREATE TRIGGER minion_job_notify AFTER INSERT OR UPDATE OF status ON minion_jobs
   FOR EACH ROW EXECUTE FUNCTION notify_minion_job_change();
+
+-- ============================================================
+-- code_imports: track GitNexus code graph import runs
+-- ============================================================
+CREATE TABLE IF NOT EXISTS code_imports (
+  id            SERIAL PRIMARY KEY,
+  repo_path     TEXT NOT NULL,
+  repo_commit   TEXT NOT NULL,
+  gitnexus_ver  TEXT NOT NULL DEFAULT '',
+  nodes_total   INTEGER NOT NULL DEFAULT 0,
+  edges_total   INTEGER NOT NULL DEFAULT 0,
+  chunks_total  INTEGER NOT NULL DEFAULT 0,
+  embedded      INTEGER NOT NULL DEFAULT 0,
+  status        TEXT NOT NULL DEFAULT 'importing',
+  error_text    TEXT,
+  started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at   TIMESTAMPTZ,
+  CONSTRAINT chk_code_imports_status CHECK (status IN ('importing', 'embedded', 'done', 'failed'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_code_imports_repo ON code_imports(repo_path, started_at DESC);
 
 -- ============================================================
 -- Row Level Security: block anon access, postgres role bypasses

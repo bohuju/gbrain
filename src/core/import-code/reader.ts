@@ -18,12 +18,8 @@ export interface GraphData {
 /**
  * Read GitNexus's knowledge graph from a repo's .gitnexus directory.
  *
- * GitNexus stores the graph in LadybugDB under `.gitnexus/lbug/`.
- * This reader shells out to `gitnexus cypher` to extract nodes and edges
- * as structured JSON, avoiding direct LadybugDB dependency.
- *
- * Fallback: if gitnexus CLI is not available, reads the meta.json for
- * stats and returns empty graph (caller can detect and warn).
+ * Shells out to `gitnexus cypher` to extract nodes and edges.
+ * Parses the markdown-table-in-JSON output format.
  */
 export async function readGitNexusGraph(repoPath: string): Promise<GraphData> {
   const metaPath = join(repoPath, '.gitnexus', 'meta.json');
@@ -35,30 +31,15 @@ export async function readGitNexusGraph(repoPath: string): Promise<GraphData> {
 
   const meta = JSON.parse(readFileSync(metaPath, 'utf-8'));
 
-  // Query all nodes via gitnexus cypher
-  const nodes = await queryCypher<{ id: string; labels: string[]; properties: Record<string, unknown> }>(
-    repoPath,
-    `MATCH (n) RETURN DISTINCT labels(n) AS labels, properties(n) AS properties, id(n) AS id LIMIT 50000`
-  );
+  // Query all nodes: MATCH (n) RETURN n gives full properties as JSON strings
+  const nodes = await queryCypherNodes(repoPath);
 
-  // Query all edges
-  const edges = await queryCypher<{ from: string; to: string; type: string; properties: Record<string, unknown> }>(
-    repoPath,
-    `MATCH ()-[r]->() RETURN id(startNode(r)) AS from, id(endNode(r)) AS to, type(r) AS type, properties(r) AS properties LIMIT 200000`
-  );
+  // Query all edges: MATCH ()-[r]->() RETURN r
+  const edges = await queryCypherEdges(repoPath);
 
   return {
-    nodes: nodes.map(row => ({
-      id: row.id,
-      label: (row.labels)[0] ?? 'Unknown',
-      properties: (row.properties ?? {}) as CodeNode['properties'],
-    })),
-    edges: edges.map(row => ({
-      from: row.from,
-      to: row.to,
-      type: row.type,
-      properties: (row.properties ?? {}) as CodeEdge['properties'],
-    })),
+    nodes,
+    edges,
     meta: {
       repoPath,
       repoCommit: meta.lastCommit ?? '',
@@ -70,21 +51,101 @@ export async function readGitNexusGraph(repoPath: string): Promise<GraphData> {
   };
 }
 
-async function queryCypher<T>(
-  repoPath: string,
-  query: string,
-): Promise<T[]> {
-  // Shell out to gitnexus CLI for cypher queries
+/**
+ * Parse the GitNexus cypher JSON response which has format:
+ *   {"markdown": "| col |\n| --- |\n| {...json...} |", "row_count": N}
+ * or for empty results:
+ *   []
+ *
+ * Extracts JSON objects from markdown table data cells.
+ */
+function parseCypherResponse(raw: string): Record<string, unknown>[] {
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length === 0) return [];
+    if (!parsed.markdown || !parsed.row_count || parsed.row_count === 0) return [];
+
+    const lines = parsed.markdown.split('\n');
+    const dataLines = lines.slice(2);
+
+    const results: Record<string, unknown>[] = [];
+    for (const line of dataLines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('|')) continue;
+      const cell = trimmed.slice(1, -1).trim();
+      try {
+        results.push(JSON.parse(cell));
+      } catch {
+        // Skip unparseable rows
+      }
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+/** Normalize GitNexus property names to what the transformer expects. */
+function normalizeNodeProps(raw: Record<string, unknown>): CodeNode['properties'] {
+  return {
+    ...raw,
+    name: (raw.name as string) ?? '',
+    file: (raw.filePath as string) ?? (raw.file as string),
+    line: (raw.startLine as number) ?? (raw.line as number),
+    endLine: (raw.endLine as number),
+    source: (raw.content as string) ?? (raw.source as string),
+    exported: (raw.isExported as boolean) ?? (raw.exported as boolean),
+    signature: (raw.signature as string),
+    language: (raw.language as string),
+  } as CodeNode['properties'];
+}
+
+async function queryCypherNodes(repoPath: string): Promise<CodeNode[]> {
   const { execSync } = await import('child_process');
   try {
     const raw = execSync(
-      `npx gitnexus cypher --repo "${repoPath}" --json "${query.replace(/"/g, '\\"')}"`,
-      { cwd: repoPath, encoding: 'utf-8', maxBuffer: 100 * 1024 * 1024, timeout: 120_000 },
+      `npx gitnexus cypher "MATCH (n) RETURN n LIMIT 50000"`,
+      { cwd: repoPath, encoding: 'utf-8', maxBuffer: 200 * 1024 * 1024, timeout: 120_000 },
     );
-    return JSON.parse(raw) as T[];
+    const rows = parseCypherResponse(raw);
+    return rows.map((row: Record<string, unknown>) => ({
+      id: JSON.stringify(row._id ?? row.id ?? ''),
+      label: String(row._label ?? 'Unknown'),
+      properties: normalizeNodeProps(row),
+    }));
   } catch {
-    // Fallback: if gitnexus cypher fails, return empty
-    // Caller handles partial data
     return [];
   }
+}
+
+async function queryCypherEdges(repoPath: string): Promise<CodeEdge[]> {
+  const { execSync } = await import('child_process');
+  const allRows: CodeEdge[] = [];
+  const batchSize = 1000;
+  let offset = 0;
+  const maxBatches = 20;
+
+  for (let i = 0; i < maxBatches; i++) {
+    try {
+      const raw = execSync(
+        `npx gitnexus cypher "MATCH ()-[r]->() RETURN r SKIP ${offset} LIMIT ${batchSize}"`,
+        { cwd: repoPath, encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024, timeout: 60_000 },
+      );
+      const rows = parseCypherResponse(raw);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        allRows.push({
+          from: JSON.stringify(row._src ?? ''),
+          to: JSON.stringify(row._dst ?? ''),
+          type: String(row.type ?? row._label ?? ''),
+          properties: row as CodeEdge['properties'],
+        });
+      }
+      if (rows.length < batchSize) break;
+      offset += batchSize;
+    } catch {
+      break;
+    }
+  }
+  return allRows;
 }
