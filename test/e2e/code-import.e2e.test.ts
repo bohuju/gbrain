@@ -14,7 +14,7 @@ describe('code import E2E', () => {
     // Use test database
     const dbUrl = process.env.TEST_DATABASE_URL || 'postgres://localhost:5432/gbrain_test';
     engine = await createEngine({ engine: 'postgres' });
-    await engine.connect({ engine: 'postgres', databaseUrl: dbUrl });
+    await engine.connect({ engine: 'postgres', database_url: dbUrl });
     await engine.initSchema();
   });
 

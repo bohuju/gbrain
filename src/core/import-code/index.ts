@@ -4,7 +4,6 @@ import { transformGraphData } from './transformer';
 import { embedCodeChunks } from './embedder';
 import { importFromContent } from '../import-file';
 import type { CodeImportOptions, CodeImportResult } from './types';
-import { execSync } from 'child_process';
 
 /**
  * Full import pipeline:
@@ -25,11 +24,14 @@ export async function runCodeImport(
 
   // Step 1: Re-index
   if (options.reindex) {
+    const { execSync } = await import('child_process');
     execSync('npx gitnexus analyze', { cwd: repoPath, stdio: 'inherit' });
   }
 
   // Step 2: Read graph
+  console.log(`[gbrain] Reading GitNexus graph from ${repoPath}...`);
   const graph = await readGitNexusGraph(repoPath);
+  console.log(`[gbrain] Graph loaded: ${graph.nodes.length} nodes, ${graph.edges.length} edges`);
 
   // Check staleness
   if (!options.force) {
@@ -56,9 +58,12 @@ export async function runCodeImport(
 
   try {
     // Step 3: Transform
+    console.log(`[gbrain] Transforming graph...`);
     const { pages, links, chunks } = transformGraphData(graph.nodes, graph.edges, repoName);
+    console.log(`[gbrain] Transformed: ${pages.length} pages, ${links.length} links, ${chunks.length} chunks`);
 
     // Step 4: Write pages
+    console.log(`[gbrain] Writing ${pages.length} pages...`);
     for (const { slug, page } of pages) {
       // Convert page to markdown for importFromContent
       const markdown = pageToMarkdown(page);
@@ -71,8 +76,8 @@ export async function runCodeImport(
           `UPDATE pages SET source_id = 'code' WHERE slug = $1 AND source_id = 'default'`,
           [slug],
         );
-      } catch {
-        // Non-fatal: skip pages that fail import
+      } catch (e) {
+        console.error(`[gbrain] Failed to import page for ${slug}:`, e instanceof Error ? e.message : String(e));
       }
     }
 
@@ -81,8 +86,8 @@ export async function runCodeImport(
       if (nodeChunks.length > 0) {
         try {
           await engine.upsertChunks(slug, nodeChunks);
-        } catch {
-          // Non-fatal
+        } catch (e) {
+          console.error(`[gbrain] Failed to upsert chunks for ${slug}:`, e instanceof Error ? e.message : String(e));
         }
       }
     }
@@ -100,8 +105,18 @@ export async function runCodeImport(
     // Step 6: Generate embeddings
     let embedded = 0;
     if (options.embed !== false) {
-      const embResult = await embedCodeChunks(engine);
+      console.log(`[gbrain] Generating embeddings...`);
+      const embResult = await embedCodeChunks(engine, {
+        onProgress: (done, total) => {
+          if (done % 10 === 0 || done === total) {
+            console.log(`[gbrain] Embedding progress: ${done}/${total}`);
+          }
+        },
+      });
       embedded = embResult.embedded;
+      if (embResult.failed > 0) {
+        console.error(`[gbrain] Embedding warnings: ${embResult.failed}/${embResult.total} chunks failed to embed`);
+      }
     }
 
     // Mark import complete
@@ -136,8 +151,8 @@ export async function runCodeImport(
   }
 }
 
-function pageToMarkdown(page: { type: string; title: string; compiled_truth: string; frontmatter: Record<string, unknown> }): string {
-  const fm = { ...page.frontmatter, type: page.type, title: page.title };
+function pageToMarkdown(page: { type: string; title: string; compiled_truth: string; frontmatter?: Record<string, unknown> }): string {
+  const fm = { ...(page.frontmatter ?? {}), type: page.type, title: page.title };
   const yaml = Object.entries(fm)
     .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
     .join('\n');

@@ -12,7 +12,8 @@ import type { CodeNode } from './types';
  */
 export function buildCodeSlug(repo: string, node: CodeNode): string {
   const kind = nodeLabelToSlugKind(node.label);
-  const name = sanitizeName(node.properties.name ?? 'unknown');
+  const raw = node.properties.name?.trim() || 'unknown';
+  const name = sanitizeName(raw) || 'unknown';
   // Repo name is the basename of the repo path
   const repoName = sanitizeName(repo.split('/').pop() ?? repo);
   return `code/${repoName}/${kind}/${name}`;

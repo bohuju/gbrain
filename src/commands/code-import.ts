@@ -4,7 +4,7 @@ import { runCodeImport } from '../core/import-code';
 export async function runCodeCommand(engine: BrainEngine, args: string[]) {
   const subCmd = args[0];
 
-  if (subCmd === 'import' || !subCmd) {
+  if (subCmd === 'import') {
     const repoPath = args[1] || process.cwd();
     const force = args.includes('--force') || args.includes('-f');
     const noEmbed = args.includes('--no-embed');
@@ -36,6 +36,13 @@ export async function runCodeCommand(engine: BrainEngine, args: string[]) {
     console.log(`  Chunks:   ${result.chunksTotal}`);
     console.log(`  Embedded: ${result.embedded}`);
     console.log(`  Time:     ${(result.durationMs / 1000).toFixed(1)}s`);
+    return;
+  }
+
+  if (!subCmd) {
+    console.log(`Usage: gbrain code [import|import-list] [options]`);
+    console.log(`  import <path> [--force] [--no-embed] [--reindex]  Import GitNexus index`);
+    console.log(`  import-list                                          List imports`);
     return;
   }
 

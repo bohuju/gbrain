@@ -59,7 +59,7 @@ export async function readGitNexusGraph(repoPath: string): Promise<GraphData> {
  *
  * Extracts JSON objects from markdown table data cells.
  */
-function parseCypherResponse(raw: string): Record<string, unknown>[] {
+export function parseCypherResponse(raw: string): Record<string, unknown>[] {
   try {
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.length === 0) return [];
@@ -80,7 +80,8 @@ function parseCypherResponse(raw: string): Record<string, unknown>[] {
       }
     }
     return results;
-  } catch {
+  } catch (e) {
+    console.error('[gbrain] Failed to query GitNexus nodes:', e instanceof Error ? e.message : String(e));
     return [];
   }
 }
@@ -113,7 +114,8 @@ async function queryCypherNodes(repoPath: string): Promise<CodeNode[]> {
       label: String(row._label ?? 'Unknown'),
       properties: normalizeNodeProps(row),
     }));
-  } catch {
+  } catch (e) {
+    console.error('[gbrain] Failed to query GitNexus nodes:', e instanceof Error ? e.message : String(e));
     return [];
   }
 }
@@ -143,7 +145,8 @@ async function queryCypherEdges(repoPath: string): Promise<CodeEdge[]> {
       }
       if (rows.length < batchSize) break;
       offset += batchSize;
-    } catch {
+    } catch (e) {
+      console.error(`[gbrain] Failed to query GitNexus edges batch ${i}:`, e instanceof Error ? e.message : String(e));
       break;
     }
   }

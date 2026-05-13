@@ -45,7 +45,8 @@ export async function embedCodeChunks(
       onBatchComplete: (done, total) => options.onProgress?.(done, total),
     });
     embeddings.push(...results);
-  } catch {
+  } catch (e) {
+    console.error('[gbrain] Embed batch failed:', e instanceof Error ? e.message : String(e));
     failed = texts.length;
     return { total: texts.length, embedded: 0, failed };
   }
@@ -61,7 +62,8 @@ export async function embedCodeChunks(
         `UPDATE content_chunks SET embedding = $1::vector, embedded_at = now() WHERE id = $2`,
         [vectorStr, raw[i].id],
       );
-    } catch {
+    } catch (e) {
+      console.error(`[gbrain] Failed to update embedding for chunk ${raw[i].id}:`, e instanceof Error ? e.message : String(e));
       failed++;
     }
   }

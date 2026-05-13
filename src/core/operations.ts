@@ -1409,7 +1409,7 @@ const code_context: Operation = {
       `SELECT p.slug, p.title, p.type, p.frontmatter
        FROM links l JOIN pages p ON p.id = l.from_page_id
        WHERE l.to_page_id = (SELECT id FROM pages WHERE slug = $1)
-         AND l.link_type IN ('code_call', 'code_import')
+         AND l.link_type = 'code_call'
          AND p.source_id = 'code' LIMIT 100`,
       [slug],
     );
@@ -1423,7 +1423,28 @@ const code_context: Operation = {
       [slug],
     );
 
+    const importers = await ctx.engine.executeRaw<{ slug: string; title: string; type: string; frontmatter: Record<string, unknown> }>(
+      `SELECT p.slug, p.title, p.type, p.frontmatter
+       FROM links l JOIN pages p ON p.id = l.from_page_id
+       WHERE l.to_page_id = (SELECT id FROM pages WHERE slug = $1)
+         AND l.link_type = 'code_import'
+         AND p.source_id = 'code' LIMIT 100`,
+      [slug],
+    );
+
+    const imports = await ctx.engine.executeRaw<{ slug: string; title: string; type: string; frontmatter: Record<string, unknown> }>(
+      `SELECT p.slug, p.title, p.type, p.frontmatter
+       FROM links l JOIN pages p ON p.id = l.to_page_id
+       WHERE l.from_page_id = (SELECT id FROM pages WHERE slug = $1)
+         AND l.link_type = 'code_import'
+         AND p.source_id = 'code' LIMIT 100`,
+      [slug],
+    );
+
     const fm = (page.frontmatter || {}) as Record<string, unknown>;
+    const mapper = (r: { slug: string; title: string; type: string; frontmatter: Record<string, unknown> }) => ({
+      slug: r.slug, name: r.title, kind: (r.frontmatter?.kind as string) || r.type, file: (r.frontmatter?.file as string) || '',
+    });
 
     return {
       symbol: {
@@ -1434,10 +1455,10 @@ const code_context: Operation = {
         line: fm.line || 0,
         signature: fm.signature,
       },
-      callers: callers.map(r => ({ slug: r.slug, name: r.title, kind: (r.frontmatter?.kind as string) || r.type, file: (r.frontmatter?.file as string) || '' })),
-      callees: callees.map(r => ({ slug: r.slug, name: r.title, kind: (r.frontmatter?.kind as string) || r.type, file: (r.frontmatter?.file as string) || '' })),
-      importers: [],
-      imports: [],
+      callers: callers.map(mapper),
+      callees: callees.map(mapper),
+      importers: importers.map(mapper),
+      imports: imports.map(mapper),
     };
   },
   cliHints: { name: 'code-context', hidden: true },
