@@ -105,13 +105,40 @@ async function runSearch(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  const results = await engine.searchKeyword(query, { type: 'code_file', limit: opts.limit });
+  // Use code_search_vector (simple config) — search_vector is NULL for code_* pages
+  const raw = await engine.executeRaw<{
+    slug: string; chunk_source: string; chunk_index: number;
+    chunk_text: string; score: number;
+  }>(`
+    SELECT p.slug, cc.chunk_source, cc.chunk_index, cc.chunk_text,
+           ts_rank(p.code_search_vector, websearch_to_tsquery('simple', $1)) AS score
+    FROM pages p
+    LEFT JOIN content_chunks cc ON cc.page_id = p.id AND cc.chunk_index = 1
+    WHERE p.source_id = 'code'
+      AND p.type LIKE 'code_%'
+      AND (p.code_search_vector @@ websearch_to_tsquery('simple', $1)
+           OR p.title ILIKE '%' || $1 || '%')
+    ORDER BY score DESC LIMIT $2
+  `, [query, opts.limit]);
+
+  const results = raw.map(r => ({
+    slug: r.slug,
+    page_id: 0,
+    title: '',
+    type: 'code_file' as const,
+    chunk_id: 0,
+    stale: false,
+    score: parseFloat(String(r.score ?? 0)),
+    chunk_source: (r.chunk_source ?? 'compiled_truth') as 'compiled_truth' | 'source_code' | 'summary' | 'embedding',
+    chunk_index: r.chunk_index ?? 0,
+    chunk_text: r.chunk_text ?? '',
+  }));
   if (opts.json) {
     console.log(JSON.stringify({ results }, null, 2));
     return;
   }
 
-  process.stdout.write(formatSearchText(results));
+  process.stdout.write(formatSearchText(results as SearchResult[]));
 }
 
 export async function runCode(engine: BrainEngine, args: string[]): Promise<void> {

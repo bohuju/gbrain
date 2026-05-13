@@ -104,8 +104,9 @@ function normalizeNodeProps(raw: Record<string, unknown>): CodeNode['properties'
 async function queryCypherNodes(repoPath: string): Promise<CodeNode[]> {
   const { execSync } = await import('child_process');
   try {
+    const repo = repoPath.split('/').pop() ?? repoPath;
     const raw = execSync(
-      `npx gitnexus cypher "MATCH (n) RETURN n LIMIT 50000"`,
+      `npx gitnexus cypher --repo ${repo} "MATCH (n) RETURN n LIMIT 50000"`,
       { cwd: repoPath, encoding: 'utf-8', maxBuffer: 200 * 1024 * 1024, timeout: 120_000 },
     );
     const rows = parseCypherResponse(raw);
@@ -122,6 +123,7 @@ async function queryCypherNodes(repoPath: string): Promise<CodeNode[]> {
 
 async function queryCypherEdges(repoPath: string): Promise<CodeEdge[]> {
   const { execSync } = await import('child_process');
+  const repo = repoPath.split('/').pop() ?? repoPath;
   const allRows: CodeEdge[] = [];
   const batchSize = 1000;
   let offset = 0;
@@ -130,7 +132,7 @@ async function queryCypherEdges(repoPath: string): Promise<CodeEdge[]> {
   for (let i = 0; i < maxBatches; i++) {
     try {
       const raw = execSync(
-        `npx gitnexus cypher "MATCH ()-[r]->() RETURN r SKIP ${offset} LIMIT ${batchSize}"`,
+        `npx gitnexus cypher --repo ${repo} "MATCH ()-[r]->() RETURN r SKIP ${offset} LIMIT ${batchSize}"`,
         { cwd: repoPath, encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024, timeout: 60_000 },
       );
       const rows = parseCypherResponse(raw);

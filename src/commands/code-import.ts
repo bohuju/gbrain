@@ -49,7 +49,7 @@ export async function runCodeCommand(engine: BrainEngine, args: string[]) {
   if (subCmd === 'import-list' || subCmd === 'imports') {
     const rows = await engine.executeRaw<{
       id: number; repo_path: string; repo_commit: string;
-      nodes_total: number; edges_total: number; status: string; started_at: string;
+      nodes_total: number; edges_total: number; status: string; started_at: string | Date;
     }>(`SELECT id, repo_path, repo_commit, nodes_total, edges_total, status, started_at
          FROM code_imports ORDER BY started_at DESC LIMIT 20`);
 
@@ -60,7 +60,8 @@ export async function runCodeCommand(engine: BrainEngine, args: string[]) {
 
     console.log('Code imports:');
     for (const r of rows) {
-      console.log(`  #${r.id}  ${r.repo_path}  ${r.repo_commit.slice(0, 7)}  ${r.nodes_total} nodes  ${r.edges_total} edges  ${r.status}  ${r.started_at?.slice(0, 19)}`);
+            const ts = r.started_at instanceof Date ? r.started_at.toISOString().slice(0, 19) : String(r.started_at ?? '?').slice(0, 19);
+      console.log(`  #${r.id}  ${r.repo_path}  ${r.repo_commit.slice(0, 7)}  ${r.nodes_total} nodes  ${r.edges_total} edges  ${r.status}  ${ts}`);
     }
     return;
   }

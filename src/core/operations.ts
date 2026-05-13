@@ -1479,7 +1479,8 @@ const code_impact: Operation = {
     const requestedDepth = (p.depth as number) || 3;
     const depth = Math.max(1, Math.min(requestedDepth, CODE_IMPACT_DEPTH_CAP));
 
-    // Resolve slug (same as code_context)
+    // Resolve slug: exact → fuzzy → title search (same as code_context)
+    const repo = p.repo as string | undefined;
     let slug: string | null = null;
     const exactPage = await ctx.engine.getPage(symbol);
     if (exactPage && (exactPage.type as string)?.startsWith('code_')) {
@@ -1491,7 +1492,15 @@ const code_impact: Operation = {
       if (codeCandidates.length === 1) slug = codeCandidates[0];
     }
     if (!slug) {
-      throw new OperationError('page_not_found', `Code symbol not found: ${symbol}`);
+      let sql = `SELECT slug FROM pages WHERE source_id = 'code' AND title = $1`;
+      const params: unknown[] = [symbol];
+      if (repo) { sql += ` AND frontmatter->>'repo' = $2`; params.push(repo); }
+      sql += ` LIMIT 1`;
+      const rows = await ctx.engine.executeRaw<{ slug: string }>(sql, params);
+      if (rows.length > 0) slug = rows[0].slug;
+    }
+    if (!slug) {
+      throw new OperationError('page_not_found', `Code symbol not found: ${symbol}`, 'Try code_query to find the symbol first');
     }
 
     const page = await ctx.engine.getPage(slug);

@@ -52,6 +52,22 @@ describe('transformGraphData', () => {
     expect(chunks[0].chunks[0].symbol_kind).toBe('Function');
   });
 
+  it('deduplicates slugs when multiple nodes produce the same slug', () => {
+    const n1 = makeNode({ id: 'A', label: 'Function', properties: { name: 'handler' } });
+    const n2 = makeNode({ id: 'B', label: 'Function', properties: { name: 'handler' } });
+    const n3 = makeNode({ id: 'C', label: 'Function', properties: { name: 'handler' } });
+    const { pages, slugMap } = transformGraphData([n1, n2, n3], [], 'test');
+    expect(pages.length).toBe(3);
+    const slugs = pages.map(p => p.slug);
+    expect(new Set(slugs).size).toBe(3);
+    expect(slugs).toContain('code/test/function/handler');
+    expect(slugs).toContain('code/test/function/handler-2');
+    expect(slugs).toContain('code/test/function/handler-3');
+    expect(slugMap.get('A')).toBe('code/test/function/handler');
+    expect(slugMap.get('B')).toBe('code/test/function/handler-2');
+    expect(slugMap.get('C')).toBe('code/test/function/handler-3');
+  });
+
   it('maps all node labels to correct page types', () => {
     const labels = ['Class', 'Method', 'Interface', 'Function', 'File', 'Enum', 'Trait'];
     const nodes = labels.map((label, i) => makeNode({ id: `${label}:${i}`, label, properties: { name: label.toLowerCase() } }));

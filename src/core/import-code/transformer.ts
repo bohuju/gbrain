@@ -23,10 +23,25 @@ export function transformGraphData(
   const slugMap = new Map<string, string>();
   const pages: Array<{ slug: string; page: PageInput }> = [];
   const chunks: Array<{ slug: string; chunks: ChunkInput[] }> = [];
+  const slugCounts = new Map<string, number>();
+  const usedSlugs = new Set<string>();
 
   // Transform nodes → pages + chunks
   for (const node of nodes) {
-    const slug = buildCodeSlug(repo, node);
+    const baseSlug = buildCodeSlug(repo, node);
+    const seen = slugCounts.get(baseSlug) ?? 0;
+    slugCounts.set(baseSlug, seen + 1);
+
+    let slug = seen === 0 ? baseSlug : `${baseSlug}-${seen + 1}`;
+    // Guard against cross-base collisions (e.g. baseSlug "foo-2" collides with
+    // dedup'd "foo" → "foo-2"). Keep incrementing until unique.
+    let extra = seen;
+    while (usedSlugs.has(slug)) {
+      extra++;
+      slug = `${baseSlug}-${extra + 1}`;
+    }
+    if (extra > seen) slugCounts.set(baseSlug, extra + 1);
+    usedSlugs.add(slug);
     slugMap.set(node.id, slug);
 
     const pageType = (NODE_TO_PAGE_TYPE[node.label] ?? 'code_file') as PageInput['type'];
